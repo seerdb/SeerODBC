@@ -92,10 +92,37 @@ meson compile -C build
 meson test -C build
 ```
 
-Useful options: `-Dwith_tls=false`, `-Dbuild_tools=false`, `-Dbuild_tests=false`.
+Useful options: `-Dwith_tls=false`, `-Dbuild_tools=false`, `-Dbuild_tests=false`,
+and `-Ddriver_libdir=<path>` to override where the driver shim installs (default
+`<libdir>/odbc`, e.g. `/usr/lib64/odbc`).
 
 If the ODBC headers (`sql.h`) are not installed, the build skips the driver
 shim and still builds the protocol core and `freeoracle`.
+
+### Linux
+
+The primary target. Install the ODBC headers via `unixODBC-devel` (or `iODBC`)
+and OpenSSL 3 via your distribution, then build as above.
+
+### macOS
+
+Builds on macOS (Apple Silicon and Intel) with Homebrew. OpenSSL 3 is keg-only
+and the ODBC Driver Manager lives under the brew prefix, so point the toolchain
+at both:
+
+```sh
+brew install meson ninja pkg-config openssl@3 unixodbc
+export PKG_CONFIG_PATH="$(brew --prefix openssl@3)/lib/pkgconfig"
+export CPPFLAGS="-I$(brew --prefix unixodbc)/include"
+export LDFLAGS="-L$(brew --prefix unixodbc)/lib"
+meson setup build
+meson compile -C build
+```
+
+`iODBC` (`brew install libiodbc`) works too — the driver is Driver-Manager
+neutral and links against neither. The shim builds as `libseerodbc.dylib`, with
+symbol export handled by the linker's `-exported_symbols_list` (the macOS
+equivalent of the Linux version script).
 
 ## License
 
