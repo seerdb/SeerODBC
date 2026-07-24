@@ -9,10 +9,14 @@ common_sources = files(
 
 common_inc = include_directories('.')
 
+# iconv_dep is attached to common_dep (below), not to the static library: an
+# archive does not link, so it needs no -liconv (charset.c's <iconv.h> is a
+# system header), and listing the dep in both places made meson emit -liconv
+# twice per consumer - harmless on glibc (iconv is in libc, so the dep is empty)
+# but a "duplicate libraries" warning from ld64 on macOS, where it is -liconv.
 libseercommon = static_library('seercommon',
   common_sources,
   include_directories : common_inc,
-  dependencies : [iconv_dep],
 )
 
 common_dep = declare_dependency(
