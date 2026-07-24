@@ -39,6 +39,16 @@ odbc_map = meson.current_source_dir() / 'seerodbc.map'
 # has no run-time dependency on either Driver Manager's instlib and loads
 # identically under unixODBC and iODBC.
 
+# Install directory for the driver shim. The shim is a dlopen()ed plugin, not a
+# linkable library, so it belongs under <libdir>/odbc (the Fedora convention and
+# the directory odbcinst-generate probes to turn a bare "Driver = libseerodbc.so"
+# into an absolute path), never in the general loader search path. Overridable
+# via -Ddriver_libdir= for non-Fedora layouts.
+driver_libdir = get_option('driver_libdir')
+if driver_libdir == ''
+  driver_libdir = get_option('libdir') / 'odbc'
+endif
+
 # Export only the SQL* symbols (version script). This keeps the protocol
 # core and OpenSSL symbols out of the host process's dynamic symbol table -
 # the same "don't pollute the host process" reasoning that ruled out GLib.
@@ -53,4 +63,5 @@ seerodbc_lib = shared_library('seerodbc',
   link_args : ['-Wl,--version-script=' + odbc_map, '-Wl,-Bsymbolic'],
   link_depends : odbc_map,
   install : true,
+  install_dir : driver_libdir,
 )

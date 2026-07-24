@@ -13,3 +13,10 @@ option('build_tools',
 option('build_tests',
   type : 'boolean', value : true,
   description : 'Build the test suite')
+
+option('driver_libdir',
+  type : 'string', value : '',
+  description : 'Install directory for the ODBC driver shim. Empty (default) ' +
+                'resolves to <libdir>/odbc (e.g. /usr/lib64/odbc), the ' +
+                'directory Fedora\'s odbcinst-generate probes to resolve bare ' +
+                'driver names. Set an absolute or prefix-relative path to override.')
