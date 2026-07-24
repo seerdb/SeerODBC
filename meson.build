@@ -18,6 +18,16 @@ cc = meson.get_compiler('c')
 
 add_project_arguments('-D_GNU_SOURCE', language : 'c')
 
+# ld64 (macOS) warns "ignoring duplicate libraries: '-liconv'" once per target:
+# meson propagates iconv's -liconv through common_dep to every consumer and does
+# not dedupe the flag across the several dependency paths. The duplicate is
+# harmless - the linker ignores the extra copy - so silence the specific noise
+# where the flag is supported. (Not an issue on glibc, where iconv is in libc and
+# dependency('iconv') contributes no -l.)
+if host_machine.system() == 'darwin' and cc.has_link_argument('-Wl,-no_warn_duplicate_libraries')
+  add_project_link_arguments('-Wl,-no_warn_duplicate_libraries', language : 'c')
+endif
+
 # --- Dependencies ---------------------------------------------------------
 openssl_dep = dependency('openssl', version : '>=3.0',
                          required : get_option('with_tls'))
