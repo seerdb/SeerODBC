@@ -346,9 +346,10 @@ static SQLRETURN exec_core(OdbcStmt *s, const char *sql)
     }
 
     SeerStatus st = seer_stmt_prepare(s->dbc->conn, sql, &s->core);
-    free(rewritten);                 /* the core copied the SQL */
-    if (st != SEER_OK)
+    if (st != SEER_OK) {
+        free(rewritten);             /* sql may alias it, but nothing reads sql now */
         return seer_odbc_diag(s, seer_odbc_sqlstate(st), 0, seer_strerror(st), SQL_ERROR);
+    }
 
     /* Data-at-execution: if any single-row INPUT parameter was bound with
      * SQL_DATA_AT_EXEC, defer the execute - return SQL_NEED_DATA and let
@@ -372,6 +373,10 @@ static SQLRETURN exec_core(OdbcStmt *s, const char *sql)
             }
         }
     }
+    /* seer_stmt_prepare copied the SQL, and the last read of `sql` (which may
+     * alias rewritten) was seer_sql_count_params above - so the rewritten
+     * buffer is safe to free here, covering both remaining exit paths. */
+    free(rewritten);
     if (has_dae) {
         s->dae_active  = 1;
         s->dae_current = -1;
