@@ -20,6 +20,7 @@
 #include <string.h>
 #include <stdint.h>
 #include <unistd.h>
+#include <fcntl.h>
 
 #include <sql.h>
 #include <sqlext.h>
@@ -1291,6 +1292,20 @@ static void check_native_sql(SQLHDBC dbc)
  * (a mid-run setenv has no effect). unixODBC's browse can't bootstrap from a raw
  * DRIVER=path the way SQLDriverConnect can, so a DSN is the only way to test it.
  * `dir` (>= 64 bytes) receives the temp dir, or "" on failure. */
+/* Like fopen(path, "w") but creates the file mode 0600 rather than the
+ * umask-default 0666 - correct hygiene for a config file, and avoids
+ * CodeQL cpp/world-writable-file-creation. */
+static FILE *fopen_private(const char *path)
+{
+    int fd = open(path, O_WRONLY | O_CREAT | O_TRUNC, 0600);
+    if (fd < 0)
+        return NULL;
+    FILE *f = fdopen(fd, "w");
+    if (f == NULL)
+        close(fd);
+    return f;
+}
+
 static void setup_browse_dsn(char *dir, const char *drv, const char *host,
                              const char *port, const char *svc)
 {
@@ -1301,9 +1316,9 @@ static void setup_browse_dsn(char *dir, const char *drv, const char *host,
     char inst[600], ini[600];
     snprintf(inst, sizeof inst, "%s/odbcinst.ini", tmpl);
     snprintf(ini,  sizeof ini,  "%s/odbc.ini", tmpl);
-    FILE *f = fopen(inst, "w");
+    FILE *f = fopen_private(inst);
     if (f) { fprintf(f, "[SeerBrowse]\nDriver=%s\n", drv); fclose(f); }
-    f = fopen(ini, "w");
+    f = fopen_private(ini);
     if (f) { fprintf(f, "[SeerBrowseDSN]\nDriver=SeerBrowse\nHOST=%s\nPORT=%s\nSERVICE=%s\n",
                      host, port, svc); fclose(f); }
     setenv("ODBCSYSINI", tmpl, 1);
