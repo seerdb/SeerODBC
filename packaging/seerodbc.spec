@@ -5,18 +5,18 @@
 # RPM spec stub for Fedora. Fill in once there is a tagged release tarball.
 Name:           seerodbc
 Version:        0.0.0
-Release:        1%{?dist}
+Release:        %autorelease
 Summary:        Clean-room ODBC driver for Oracle Database
-
 License:        Apache-2.0
 URL:            https://github.com/lemenkov/seerodbc
-Source0:        %{name}-%{version}.tar.xz
-
+VCS:            git:%{url}.git
+Source:         %{url}/archive/%{version}/%{name}-%{version}.tar.gz
 BuildRequires:  gcc
 BuildRequires:  meson
 BuildRequires:  ninja-build
 BuildRequires:  pkgconfig(openssl)
 BuildRequires:  unixODBC-devel
+Requires:       odbcinst-generate
 
 %description
 SeerODBC lets ODBC consumers talk to an Oracle database by speaking the
@@ -24,7 +24,7 @@ Oracle TNS/TTC wire protocol directly, with no Oracle Instant Client.
 It is a clean-room implementation (see CONTRIBUTING.md).
 
 %prep
-%autosetup
+%autosetup -p1 -n %{name}-%{version}
 
 %build
 %meson
@@ -35,9 +35,9 @@ It is a clean-room implementation (see CONTRIBUTING.md).
 
 %files
 %license LICENSE
-%doc README.md NOTICE
-%{_libdir}/libseerodbc.so
+%doc README.md NOTICE packaging/odbcinst.ini.sample docs/*.md
+%{_libdir}/odbc/libseerodbc.so
 %{_bindir}/freeoracle
 
 %changelog
-# TODO: add changelog entries at release time
+%autochangelog
