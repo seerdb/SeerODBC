@@ -33,7 +33,8 @@ odbc_pure_dep = declare_dependency(
   dependencies : [common_dep],
 )
 
-odbc_map = meson.current_source_dir() / 'seerodbc.map'
+odbc_map = meson.current_source_dir() / 'seerodbc.map'   # GNU ld version script
+odbc_exp = meson.current_source_dir() / 'seerodbc.exp'   # ld64 export list (macOS)
 
 # No libodbcinst / libiodbcinst: odbcini.c reads odbc.ini itself, so the driver
 # has no run-time dependency on either Driver Manager's instlib and loads
@@ -49,19 +50,31 @@ if driver_libdir == ''
   driver_libdir = get_option('libdir') / 'odbc'
 endif
 
-# Export only the SQL* symbols (version script). This keeps the protocol
-# core and OpenSSL symbols out of the host process's dynamic symbol table -
-# the same "don't pollute the host process" reasoning that ruled out GLib.
+# Export only the SQL* symbols. This keeps the protocol core and OpenSSL symbols
+# out of the host process's dynamic symbol table - the same "don't pollute the
+# host process" reasoning that ruled out GLib. The mechanism is linker-specific:
+#
+#   GNU ld (Linux, *BSD): a version script for the export set, plus -Bsymbolic so
+#     a *W wrapper that calls an ANSI SQL* function reaches OUR definition, not
+#     the Driver Manager's identically-named global (which would get our internal
+#     handle and reject it).
+#   ld64 (macOS): -exported_symbols_list for the export set; two-level namespace
+#     (the default) already binds intra-library calls to our own definitions, so
+#     no -Bsymbolic equivalent is needed. seerodbc.map's "SQL*" becomes "_SQL*".
+if host_machine.system() == 'darwin'
+  odbc_export_args    = ['-Wl,-exported_symbols_list,' + odbc_exp]
+  odbc_export_depends = odbc_exp
+else
+  odbc_export_args    = ['-Wl,--version-script=' + odbc_map, '-Wl,-Bsymbolic']
+  odbc_export_depends = odbc_map
+endif
+
 seerodbc_lib = shared_library('seerodbc',
   odbc_sources,
   include_directories : include_directories('.'),
   dependencies : [seertns_dep, common_dep, odbc_pure_dep],
-  # -Bsymbolic: a *W wrapper that calls an ANSI SQL* function must reach OUR
-  # definition, not the Driver Manager's identically-named global symbol (which
-  # would get our internal handle and reject it). Bind intra-library references
-  # to our own definitions. The version script still controls what is exported.
-  link_args : ['-Wl,--version-script=' + odbc_map, '-Wl,-Bsymbolic'],
-  link_depends : odbc_map,
+  link_args : odbc_export_args,
+  link_depends : odbc_export_depends,
   install : true,
   install_dir : driver_libdir,
 )
