@@ -766,9 +766,16 @@ SQLRETURN seer_odbc_pos_update(OdbcStmt *s, long row)
         if (elem < 0)
             continue;
 
-        /* Build UPDATE <table> SET <bound col> = :k, ... WHERE ROWID = :last. */
+        /* Build UPDATE <table> SET <bound col> = :k, ... WHERE ROWID = :last.
+         * snprintf returns the length it WOULD have written, so an unchecked
+         * "o += snprintf(...)" can push o past the buffer; the next
+         * "sizeof sql - o" then underflows to a huge size_t and the following
+         * write runs out of bounds. Guard every append and bail if the
+         * statement (schema-derived table + column names) does not fit. */
         char sql[4096];
         int  o = snprintf(sql, sizeof sql, "UPDATE %s SET ", s->base_table);
+        if (o < 0 || (size_t)o >= sizeof sql)
+            return seer_odbc_diag(s, "HY000", 0, "Updatable cursor statement too long", SQL_ERROR);
         int  nset = 0;
         for (int i = 0; i < s->num_binds; i++) {
             if (!s->binds[i].bound)
@@ -776,13 +783,18 @@ SQLRETURN seer_odbc_pos_update(OdbcStmt *s, long row)
             const char *name = seer_stmt_col_name(s->core, i);
             if (name == NULL)
                 continue;
-            o += snprintf(sql + o, sizeof sql - (size_t)o, "%s%s = :%d",
-                          nset ? ", " : "", name, nset + 1);
+            int n = snprintf(sql + o, sizeof sql - (size_t)o, "%s%s = :%d",
+                             nset ? ", " : "", name, nset + 1);
+            if (n < 0 || (size_t)n >= sizeof sql - (size_t)o)
+                return seer_odbc_diag(s, "HY000", 0, "Updatable cursor statement too long", SQL_ERROR);
+            o += n;
             nset++;
         }
         if (nset == 0)
             return seer_odbc_diag(s, "HY000", 0, "No columns bound for update", SQL_ERROR);
-        snprintf(sql + o, sizeof sql - (size_t)o, " WHERE ROWID = :%d", nset + 1);
+        int wn = snprintf(sql + o, sizeof sql - (size_t)o, " WHERE ROWID = :%d", nset + 1);
+        if (wn < 0 || (size_t)wn >= sizeof sql - (size_t)o)
+            return seer_odbc_diag(s, "HY000", 0, "Updatable cursor statement too long", SQL_ERROR);
 
         SeerStmt *dml = NULL;
         if (seer_stmt_prepare(s->dbc->conn, sql, &dml) != SEER_OK)

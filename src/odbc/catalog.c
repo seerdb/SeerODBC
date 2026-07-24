@@ -206,10 +206,15 @@ SQLRETURN SQL_API SQLGetTypeInfo(SQLHSTMT StatementHandle, SQLSMALLINT DataType)
     char sql[8192];
     size_t off = 0;
     int emitted = 0;
+    /* Every append is guarded: snprintf returns the length it WOULD have
+     * written, so an unchecked "off += snprintf(...)" (or a negative return
+     * cast to size_t) can push off past the buffer and make the next
+     * "sizeof sql - off" underflow into a huge size_t. The TYPEINFO table is
+     * statically bounded so this cannot overflow today, but guard it anyway. */
     for (size_t i = 0; i < sizeof TYPEINFO / sizeof TYPEINFO[0]; i++) {
         if (DataType != SQL_ALL_TYPES && DataType != TYPEINFO[i].sql_type)
             continue;
-        off += (size_t)snprintf(sql + off, sizeof sql - off,
+        int n = snprintf(sql + off, sizeof sql - off,
             "%sSELECT '%s' TYPE_NAME, %d DATA_TYPE, %ld COLUMN_SIZE,"
             " CAST(NULL AS VARCHAR2(1)) LITERAL_PREFIX, CAST(NULL AS VARCHAR2(1)) LITERAL_SUFFIX,"
             " CAST(NULL AS VARCHAR2(1)) CREATE_PARAMS, 1 NULLABLE, %d CASE_SENSITIVE,"
@@ -221,14 +226,20 @@ SQLRETURN SQL_API SQLGetTypeInfo(SQLHSTMT StatementHandle, SQLSMALLINT DataType)
             emitted ? " UNION ALL " : "",
             TYPEINFO[i].name, TYPEINFO[i].sql_type, TYPEINFO[i].column_size,
             TYPEINFO[i].case_sensitive, TYPEINFO[i].sql_type, TYPEINFO[i].radix);
+        if (n < 0 || (size_t)n >= sizeof sql - off)
+            return seer_odbc_diag(s, "HY000", 0, "Type-info query too long", SQL_ERROR);
+        off += (size_t)n;
         emitted = 1;
     }
     if (!emitted)   /* unknown requested type: an empty result set */
         snprintf(sql, sizeof sql,
             "SELECT CAST(NULL AS VARCHAR2(1)) TYPE_NAME, CAST(NULL AS NUMBER) DATA_TYPE"
             " FROM dual WHERE 1=0");
-    else
-        off += (size_t)snprintf(sql + off, sizeof sql - off, " ORDER BY DATA_TYPE");
+    else {
+        int n = snprintf(sql + off, sizeof sql - off, " ORDER BY DATA_TYPE");
+        if (n < 0 || (size_t)n >= sizeof sql - off)
+            return seer_odbc_diag(s, "HY000", 0, "Type-info query too long", SQL_ERROR);
+    }
 
     return seer_odbc_run_query(s, sql, NULL, 0);
 }
