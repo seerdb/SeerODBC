@@ -7,6 +7,7 @@
 
 #include <errno.h>
 #include <iconv.h>
+#include <stdint.h>
 #include <stdlib.h>
 
 int seer_iconv(const char *from, const char *to,
@@ -22,6 +23,14 @@ int seer_iconv(const char *from, const char *to,
     if (cd == (iconv_t)-1)
         return -1;
 
+    /* Reject inputs whose size computation (in_len*2 + 16, then +1 for the NUL)
+     * would wrap size_t - a wrapped, undersized buffer would overflow in the
+     * iconv loop below. This rejects only unrepresentable sizes, not any real
+     * value (in_len is an in-memory string length). */
+    if (in_len > (SIZE_MAX - 17) / 2) {
+        iconv_close(cd);
+        return -1;
+    }
     size_t cap = in_len * 2 + 16;
     char  *buf = malloc(cap + 1);
     if (buf == NULL) {
@@ -40,6 +49,11 @@ int seer_iconv(const char *from, const char *to,
             continue;
         if (errno == E2BIG) {
             size_t used   = (size_t)(outbuf - buf);
+            if (cap > (SIZE_MAX - 1) / 2) {   /* cannot grow (cap*2 + 1) without overflow */
+                free(buf);
+                iconv_close(cd);
+                return -1;
+            }
             size_t newcap = cap * 2;
             char  *nb     = realloc(buf, newcap + 1);
             if (nb == NULL) {
