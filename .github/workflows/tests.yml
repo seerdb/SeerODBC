@@ -58,6 +58,32 @@ jobs:
       - name: Unit tests
         run: meson test -C build --print-errorlogs
 
+  # Offline build + unit tests on macOS. This is the real validator for the
+  # ld64 symbol-export path (seerodbc.exp / -exported_symbols_list) since it can
+  # only be exercised on Apple's linker. Homebrew's OpenSSL 3 is keg-only, and
+  # the ODBC Driver Manager headers/libs (sql.h, libodbc) live under the brew
+  # prefix, so both are wired in via PKG_CONFIG_PATH / CPPFLAGS / LDFLAGS. No
+  # Oracle here: the live meson tests self-gate (exit 77) without SEER_TEST_*.
+  build-macos:
+    name: Build + unit (macOS)
+    runs-on: macos-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install build dependencies
+        run: brew install meson ninja pkg-config openssl@3 unixodbc
+      - name: Wire Homebrew keg paths into the toolchain
+        run: |
+          echo "PKG_CONFIG_PATH=$(brew --prefix openssl@3)/lib/pkgconfig" >> "$GITHUB_ENV"
+          echo "CPPFLAGS=-I$(brew --prefix unixodbc)/include" >> "$GITHUB_ENV"
+          echo "LDFLAGS=-L$(brew --prefix unixodbc)/lib" >> "$GITHUB_ENV"
+      - name: Configure
+        run: meson setup build
+      - name: Compile
+        run: meson compile -C build
+      - name: Unit tests
+        run: meson test -C build --print-errorlogs
+
   # Integration tests against a real Oracle server, run across the three public
   # tiers via redistributable gvenzl images: 11g (:1521/XE), 21c (:1521/XEPDB1)
   # and 23ai Free (:1521/FREEPDB1). (10g and 9i can't ship to public CI — 10g's

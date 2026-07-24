@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
+#
+# SPDX-License-Identifier: Apache-2.0
+#
+# macOS (ld64) equivalent of seerodbc.map. -exported_symbols_list makes the
+# driver export ONLY the ODBC entry points; every other symbol (protocol core,
+# OpenSSL, libc helpers) is hidden from the Driver Manager and the host process.
+# Mach-O prefixes C symbols with an underscore, so the pattern is _SQL*.
+#
+# macOS links two-level namespace by default, which binds a *W wrapper's call to
+# an ANSI SQL* function to OUR definition rather than the Driver Manager's - the
+# same guarantee -Wl,-Bsymbolic gives us with GNU ld, so no extra flag is needed.
+_SQL*
