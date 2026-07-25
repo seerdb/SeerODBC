@@ -16,7 +16,12 @@ project('seerodbc', 'c',
 
 cc = meson.get_compiler('c')
 
-add_project_arguments('-D_GNU_SOURCE', language : 'c')
+# _GNU_SOURCE unlocks the glibc extensions the core relies on (and is harmless on
+# the BSD libc under macOS). It is meaningless on Windows/MinGW, whose headers key
+# off different feature macros, so scope it to the POSIX platforms.
+if host_machine.system() != 'windows'
+  add_project_arguments('-D_GNU_SOURCE', language : 'c')
+endif
 
 # ld64 (macOS) warns "ignoring duplicate libraries: '-liconv'" once per target:
 # meson propagates iconv's -liconv through common_dep to every consumer and does
