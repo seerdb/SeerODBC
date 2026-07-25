@@ -21,6 +21,12 @@ cc = meson.get_compiler('c')
 # off different feature macros, so scope it to the POSIX platforms.
 if host_machine.system() != 'windows'
   add_project_arguments('-D_GNU_SOURCE', language : 'c')
+else
+  # MinGW defaults printf/snprintf to Microsoft's msvcrt, which lacks the C99 'z'
+  # (size_t) and other length modifiers the core's format strings use. Select
+  # MinGW's C99-conformant stdio instead - fixes %zu/%zd both at compile time
+  # (-Wformat) and, more importantly, at run time. Must be defined before <stdio.h>.
+  add_project_arguments('-D__USE_MINGW_ANSI_STDIO=1', language : 'c')
 endif
 
 # ld64 (macOS) warns "ignoring duplicate libraries: '-liconv'" once per target:
@@ -50,12 +56,21 @@ subdir('src/tns')
 # The ODBC shim needs the Driver Manager headers (sql.h, from unixODBC or
 # iODBC). Build it only when those headers are present, so the protocol core
 # and freeoracle still configure on a machine without unixODBC-devel.
-build_driver = cc.has_header('sql.h')
+sql_h = cc.has_header('sql.h')
+# On Windows sql.h is MinGW's native ODBC header, but porting the shim to it is a
+# later phase of the Windows port (the native headers need <windows.h> included
+# first for HWND/DWORD/GUID, SQLWCHAR is UTF-16 not UTF-32, symbol export moves to
+# a .def, and DSNs live in the registry). Until then Windows builds the protocol
+# core + freeoracle only.
+build_driver = sql_h and host_machine.system() != 'windows'
 if build_driver
   subdir('src/odbc')
-else
+elif not sql_h
   warning('ODBC headers (sql.h) not found - skipping the driver shim. ' +
           'Install unixODBC-devel or iODBC to build it.')
+else
+  message('Windows: ODBC shim deferred to a later phase of the port - ' +
+          'building the protocol core and freeoracle only.')
 endif
 
 if get_option('build_tools')

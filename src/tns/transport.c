@@ -6,17 +6,11 @@
 #include "transport.h"
 
 #include "log.h"
+#include "netcompat.h"
 
-#include <errno.h>
-#include <fcntl.h>
-#include <netdb.h>
-#include <poll.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <sys/socket.h>
-#include <sys/types.h>
-#include <unistd.h>
 
 #include <openssl/ssl.h>
 #include <openssl/err.h>
@@ -24,9 +18,9 @@
 #define DEFAULT_TIMEOUT_MS 30000
 
 struct SeerTransport {
-    int      fd;
-    SSL     *ssl;     /* non-NULL once TLS is established */
-    SSL_CTX *ctx;
+    seer_socket_t fd;
+    SSL          *ssl;   /* non-NULL once TLS is established */
+    SSL_CTX      *ctx;
 };
 
 /* The most recent OpenSSL error string (for logging), or a fallback. */
@@ -37,58 +31,48 @@ static const char *ssl_err(void)
 }
 
 /* Restore blocking mode and arm SO_RCVTIMEO / SO_SNDTIMEO on the socket. */
-static void arm_io_timeout(int fd, int timeout_ms)
+static void arm_io_timeout(seer_socket_t fd, int timeout_ms)
 {
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags >= 0)
-        (void)fcntl(fd, F_SETFL, flags & ~O_NONBLOCK);
-
-    struct timeval tv = {
-        .tv_sec  = timeout_ms / 1000,
-        .tv_usec = (timeout_ms % 1000) * 1000,
-    };
-    (void)setsockopt(fd, SOL_SOCKET, SO_RCVTIMEO, &tv, sizeof tv);
-    (void)setsockopt(fd, SOL_SOCKET, SO_SNDTIMEO, &tv, sizeof tv);
+    (void)seer_sock_set_nonblocking(fd, 0);
+    seer_sock_set_io_timeout(fd, timeout_ms);
 }
 
 /* Non-blocking connect to one resolved address, bounded by timeout_ms.
- * Returns a connected fd or -1. */
-static int connect_one(const struct addrinfo *ai, int timeout_ms)
+ * Returns a connected socket or SEER_INVALID_SOCKET. */
+static seer_socket_t connect_one(const struct addrinfo *ai, int timeout_ms)
 {
-    int fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
-    if (fd < 0)
-        return -1;
+    seer_socket_t fd = socket(ai->ai_family, ai->ai_socktype, ai->ai_protocol);
+    if (fd == SEER_INVALID_SOCKET)
+        return SEER_INVALID_SOCKET;
 
-    int flags = fcntl(fd, F_GETFL, 0);
-    if (flags < 0 || fcntl(fd, F_SETFL, flags | O_NONBLOCK) < 0) {
-        close(fd);
-        return -1;
+    if (seer_sock_set_nonblocking(fd, 1) != 0) {
+        seer_closesocket(fd);
+        return SEER_INVALID_SOCKET;
     }
 
     int rc;
     do {
-        rc = connect(fd, ai->ai_addr, ai->ai_addrlen);
-    } while (rc < 0 && errno == EINTR);
+        rc = connect(fd, ai->ai_addr, (socklen_t)ai->ai_addrlen);
+    } while (rc < 0 && seer_sock_errno() == SEER_EINTR);
 
-    if (rc < 0 && errno == EINPROGRESS) {
-        struct pollfd pfd = { .fd = fd, .events = POLLOUT };
+    if (rc < 0 && seer_sock_errno() == SEER_EINPROGRESS) {
+        seer_pollfd pfd = { .fd = fd, .events = POLLOUT };
         do {
-            rc = poll(&pfd, 1, timeout_ms);
-        } while (rc < 0 && errno == EINTR);
+            rc = seer_poll(&pfd, 1, timeout_ms);
+        } while (rc < 0 && seer_sock_errno() == SEER_EINTR);
 
         if (rc <= 0) {                 /* timed out (0) or poll error (<0) */
-            close(fd);
-            return -1;
+            seer_closesocket(fd);
+            return SEER_INVALID_SOCKET;
         }
         int err = 0;
-        socklen_t errlen = sizeof err;
-        if (getsockopt(fd, SOL_SOCKET, SO_ERROR, &err, &errlen) < 0 || err != 0) {
-            close(fd);
-            return -1;
+        if (seer_sock_so_error(fd, &err) != 0 || err != 0) {
+            seer_closesocket(fd);
+            return SEER_INVALID_SOCKET;
         }
     } else if (rc < 0) {
-        close(fd);
-        return -1;
+        seer_closesocket(fd);
+        return SEER_INVALID_SOCKET;
     }
 
     arm_io_timeout(fd, timeout_ms);
@@ -103,6 +87,11 @@ SeerStatus seer_transport_connect(const char *host, uint16_t port,
     *out = NULL;
     if (timeout_ms <= 0)
         timeout_ms = DEFAULT_TIMEOUT_MS;
+
+    if (seer_net_init() != 0) {
+        seer_log(SEER_LOG_ERROR, "transport: network stack init failed");
+        return SEER_EIO;
+    }
 
     char portstr[6];
     snprintf(portstr, sizeof portstr, "%u", (unsigned)port);
@@ -119,15 +108,15 @@ SeerStatus seer_transport_connect(const char *host, uint16_t port,
         return SEER_EIO;
     }
 
-    int fd = -1;
+    seer_socket_t fd = SEER_INVALID_SOCKET;
     for (struct addrinfo *ai = res; ai != NULL; ai = ai->ai_next) {
         fd = connect_one(ai, timeout_ms);
-        if (fd >= 0)
+        if (fd != SEER_INVALID_SOCKET)
             break;
     }
     freeaddrinfo(res);
 
-    if (fd < 0) {
+    if (fd == SEER_INVALID_SOCKET) {
         seer_log(SEER_LOG_ERROR, "transport: connect to %s:%u failed",
                  host, (unsigned)port);
         return SEER_EIO;
@@ -135,7 +124,7 @@ SeerStatus seer_transport_connect(const char *host, uint16_t port,
 
     SeerTransport *t = calloc(1, sizeof *t);
     if (t == NULL) {
-        close(fd);
+        seer_closesocket(fd);
         return SEER_ENOMEM;
     }
     t->fd = fd;
@@ -181,7 +170,7 @@ SeerStatus seer_transport_start_tls(SeerTransport *t, const char *sni_host,
         SSL_CTX_free(ctx);
         return SEER_EIO;
     }
-    SSL_set_fd(ssl, t->fd);
+    SSL_set_fd(ssl, (int)t->fd);
     if (sni_host != NULL && *sni_host) {
         SSL_set_tlsext_host_name(ssl, sni_host);   /* SNI */
         if (verify)
@@ -215,8 +204,8 @@ void seer_transport_close(SeerTransport *t)
     }
     if (t->ctx != NULL)
         SSL_CTX_free(t->ctx);
-    if (t->fd >= 0)
-        close(t->fd);
+    if (t->fd != SEER_INVALID_SOCKET)
+        seer_closesocket(t->fd);
     free(t);
 }
 
@@ -240,11 +229,12 @@ SeerStatus seer_transport_write_all(SeerTransport *t, const void *buf, size_t le
             off += (size_t)n;
             continue;
         }
-        ssize_t n = write(t->fd, p + off, len - off);
+        ptrdiff_t n = seer_sock_send(t->fd, p + off, len - off);
         if (n < 0) {
-            if (errno == EINTR)
+            if (seer_sock_errno() == SEER_EINTR)
                 continue;
-            seer_log(SEER_LOG_ERROR, "transport: write failed: %s", strerror(errno));
+            seer_log(SEER_LOG_ERROR, "transport: write failed (error %d)",
+                     seer_sock_errno());
             return SEER_EIO;
         }
         off += (size_t)n;
@@ -276,11 +266,12 @@ SeerStatus seer_transport_read_full(SeerTransport *t, void *buf, size_t len)
             off += (size_t)n;
             continue;
         }
-        ssize_t n = read(t->fd, p + off, len - off);
+        ptrdiff_t n = seer_sock_recv(t->fd, p + off, len - off);
         if (n < 0) {
-            if (errno == EINTR)
+            if (seer_sock_errno() == SEER_EINTR)
                 continue;
-            seer_log(SEER_LOG_ERROR, "transport: read failed: %s", strerror(errno));
+            seer_log(SEER_LOG_ERROR, "transport: read failed (error %d)",
+                     seer_sock_errno());
             return SEER_EIO;
         }
         if (n == 0) {

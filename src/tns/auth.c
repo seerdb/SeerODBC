@@ -5,6 +5,8 @@
  */
 #include "auth.h"
 
+#include "compat.h"
+
 #include <openssl/evp.h>
 #include <openssl/provider.h>
 #include <openssl/rand.h>
@@ -493,7 +495,7 @@ bool seer_o5logon_validate(const uint8_t *resp, size_t resp_len,
         return false;
     bool ok = false;
     if (aes_cbc(0, conn_key, conn_key_len, resp, resp_len, hay) == SEER_OK)
-        ok = memmem(hay, resp_len, "SERVER_TO_CLIENT", 16) != NULL;
+        ok = seer_memmem(hay, resp_len, "SERVER_TO_CLIENT", 16) != NULL;
     free(hay);
     return ok;
 }
