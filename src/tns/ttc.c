@@ -9,6 +9,7 @@
 #include "conn.h"
 #include "log.h"
 #include "marshal.h"
+#include "netcompat.h"   /* gethostname(): <unistd.h> on POSIX, Winsock on Windows */
 #include "packet.h"
 #include "reader.h"
 #include "tns_consts.h"
