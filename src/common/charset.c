@@ -38,7 +38,9 @@ int seer_iconv(const char *from, const char *to,
         return -1;
     }
 
-    char  *inbuf  = (char *)in;
+    /* SEER_ICONV_CONST is 'const' where iconv() takes 'const char **' (win-iconv)
+     * and empty where it takes 'char **' (glibc, GNU libiconv) - see meson.build. */
+    SEER_ICONV_CONST char *inbuf = (SEER_ICONV_CONST char *)in;
     size_t inleft = in_len;
     char  *outbuf = buf;
     size_t outleft = cap;

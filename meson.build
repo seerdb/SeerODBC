@@ -42,7 +42,24 @@ endif
 # --- Dependencies ---------------------------------------------------------
 openssl_dep = dependency('openssl', version : '>=3.0',
                          required : get_option('with_tls'))
-iconv_dep   = dependency('iconv')   # libc on glibc; libiconv elsewhere
+iconv_dep   = dependency('iconv')   # libc on glibc; libiconv/win-iconv elsewhere
+
+# iconv()'s second argument is 'char **' on glibc and GNU libiconv but
+# 'const char **' on win-iconv (the POSIX/SysV signature, used by e.g. Fedora's
+# mingw stack). Detect which so charset.c can type its input pointer to match and
+# compile cleanly under either - the autotools ICONV_CONST idiom.
+iconv_const = ''
+if not cc.compiles('''#include <iconv.h>
+int main(void) {
+  char *in = 0, *out = 0;
+  size_t inleft = 0, outleft = 0;
+  iconv((iconv_t)0, &in, &inleft, &out, &outleft);
+  return 0;
+}''', dependencies : iconv_dep, args : ['-Werror'],
+      name : 'iconv takes a non-const (char **) input argument')
+  iconv_const = 'const'
+endif
+add_project_arguments('-DSEER_ICONV_CONST=' + iconv_const, language : 'c')
 
 # Public header dir for the protocol core API (include/seer/seertns.h).
 core_inc = include_directories('include')
