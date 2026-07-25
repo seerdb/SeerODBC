@@ -84,6 +84,36 @@ jobs:
       - name: Unit tests
         run: meson test -C build --print-errorlogs
 
+  # First step of the Windows port: prove meson.build *configures* cleanly on
+  # Windows via the MSYS2 / MinGW-w64 toolchain, before any source is ported.
+  # This catches feature-macro and dependency-gating regressions on Windows early.
+  # Compilation and unit tests are added to this job as the winsock/libc shims
+  # land; until then it deliberately stops at `meson setup`. MinGW is the initial
+  # target (the fastest path to green Windows CI); an MSVC leg comes later.
+  build-windows:
+    name: Configure (Windows/MinGW)
+    runs-on: windows-latest
+    timeout-minutes: 20
+    defaults:
+      run:
+        shell: msys2 {0}
+    steps:
+      - uses: actions/checkout@v7
+      - name: Set up MSYS2 / MinGW-w64
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            mingw-w64-x86_64-gcc
+            mingw-w64-x86_64-meson
+            mingw-w64-x86_64-ninja
+            mingw-w64-x86_64-pkgconf
+            mingw-w64-x86_64-openssl
+            mingw-w64-x86_64-libiconv
+      - name: Configure
+        run: meson setup build
+
   # Integration tests against a real Oracle server, run across the three public
   # tiers via redistributable gvenzl images: 11g (:1521/XE), 21c (:1521/XEPDB1)
   # and 23ai Free (:1521/FREEPDB1). (10g and 9i can't ship to public CI — 10g's
