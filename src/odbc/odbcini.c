@@ -5,11 +5,13 @@
  * SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
 
+#include "compat.h"
 #include "odbcini.h"
 
 /* Trim leading whitespace by advancing the pointer; trailing whitespace
@@ -46,15 +48,19 @@ static int copy_out(const char *val, char *retbuf, int retbuf_len)
 static char *lookup_in_file(const char *path, const char *section,
                             const char *entry)
 {
-    FILE *f = fopen(path, "re");
+#ifdef _WIN32
+    FILE *f = fopen(path, "r");    /* no close-on-exec concept on Windows */
+#else
+    FILE *f = fopen(path, "re");   /* 'e' = O_CLOEXEC */
+#endif
     if (f == NULL)
         return NULL;
 
     char *line = NULL, *found = NULL;
     size_t cap = 0;
     int in_section = 0;
-    ssize_t len;
-    while ((len = getline(&line, &cap, f)) != -1) {
+    ptrdiff_t len;
+    while ((len = seer_getline(&line, &cap, f)) != -1) {
         char *p = trim(line);
         if (*p == '\0' || *p == ';' || *p == '#')
             continue;

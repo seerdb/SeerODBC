@@ -35,6 +35,7 @@ odbc_pure_dep = declare_dependency(
 
 odbc_map = meson.current_source_dir() / 'seerodbc.map'   # GNU ld version script
 odbc_exp = meson.current_source_dir() / 'seerodbc.exp'   # ld64 export list (macOS)
+odbc_def = meson.current_source_dir() / 'seerodbc.def'   # PE module defs (Windows)
 
 # No libodbcinst / libiodbcinst: odbcini.c reads odbc.ini itself, so the driver
 # has no run-time dependency on either Driver Manager's instlib and loads
@@ -61,9 +62,16 @@ endif
 #   ld64 (macOS): -exported_symbols_list for the export set; two-level namespace
 #     (the default) already binds intra-library calls to our own definitions, so
 #     no -Bsymbolic equivalent is needed. seerodbc.map's "SQL*" becomes "_SQL*".
+#   Windows (GNU ld / PE): a .def module-definition file. GNU ld applies version
+#     scripts only to ELF, so PE restricts exports through the .def instead. PE
+#     has no ELF-style symbol interposition - a *W wrapper's call always binds to
+#     this DLL's own SQL* - so there is no -Bsymbolic equivalent to add.
 if host_machine.system() == 'darwin'
   odbc_export_args    = ['-Wl,-exported_symbols_list,' + odbc_exp]
   odbc_export_depends = odbc_exp
+elif host_machine.system() == 'windows'
+  odbc_export_args    = [odbc_def]
+  odbc_export_depends = odbc_def
 else
   odbc_export_args    = ['-Wl,--version-script=' + odbc_map, '-Wl,-Bsymbolic']
   odbc_export_depends = odbc_map

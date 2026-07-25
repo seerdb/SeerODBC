@@ -3,6 +3,8 @@
  * SPDX-License-Identifier: Apache-2.0 */
 #include "sqlprep.h"
 
+#include "compat.h"
+
 #include <ctype.h>
 #include <stdbool.h>
 #include <stdio.h>
@@ -84,7 +86,7 @@ static int emit_escape(Buf *out, const char *kw, size_t kwlen,
         return buf_put(out, "ESCAPE ", 7) || buf_put(out, rest, restlen);
     if ((kwlen == 2 && strncasecmp(kw, "fn", 2) == 0) ||
         (kwlen == 2 && strncasecmp(kw, "oj", 2) == 0)) {
-        char *tmp = strndup(rest, restlen);
+        char *tmp = seer_strndup(rest, restlen);
         if (tmp == NULL) return -1;
         char *inner = inline_escapes(tmp);    /* recurse (nested escapes) */
         free(tmp);
@@ -333,7 +335,7 @@ char *seer_sql_make_updatable(const char *sql, char **table, int lock)
     const char *tbl_end = skip_dotted_ident(t, &tbl_last);
     if (tbl_end == t)
         return NULL;                                  /* no identifier */
-    char *base = strndup(tbl_start, (size_t)(tbl_end - tbl_start));
+    char *base = seer_strndup(tbl_start, (size_t)(tbl_end - tbl_start));
 
     /* Optional alias, then the next token must end the single-table FROM. */
     const char *a = tbl_end;

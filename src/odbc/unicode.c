@@ -13,6 +13,8 @@
  * SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include "odbc_platform.h"   /* <windows.h> before the ODBC headers on Windows */
+
 #include <sql.h>
 #include <sqlext.h>
 #include <sqlucode.h>

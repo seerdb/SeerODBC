@@ -1,0 +1,80 @@
+; SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
+;
+; SPDX-License-Identifier: Apache-2.0
+;
+; Windows (PE/COFF) equivalent of seerodbc.map / seerodbc.exp: the module
+; definition file that makes the DLL export ONLY the ODBC entry points, so the
+; protocol core, OpenSSL and libc helpers stay internal - the Driver Manager
+; finds SQL* via GetProcAddress and nothing else pollutes the export table.
+; (GNU ld honours version scripts only for ELF, not PE, so PE needs this .def.)
+;
+; Names are UNDECORATED so a future 32-bit (__stdcall) build still exports plain
+; SQLConnect, not _SQLConnect@N, which the Driver Manager could not resolve.
+;
+; Keep in sync with the SQL* set exported by seerodbc.map (the ELF source of
+; truth): every entry point defined with SQL_API in src/odbc/*.c belongs here.
+EXPORTS
+    SQLAllocHandle
+    SQLBindCol
+    SQLBindParameter
+    SQLBrowseConnect
+    SQLBulkOperations
+    SQLCancel
+    SQLCloseCursor
+    SQLColAttribute
+    SQLColAttributeW
+    SQLColumns
+    SQLColumnsW
+    SQLConnect
+    SQLConnectW
+    SQLDescribeCol
+    SQLDescribeColW
+    SQLDescribeParam
+    SQLDisconnect
+    SQLDriverConnect
+    SQLDriverConnectW
+    SQLEndTran
+    SQLExecDirect
+    SQLExecDirectW
+    SQLExecute
+    SQLFetch
+    SQLFetchScroll
+    SQLForeignKeys
+    SQLFreeHandle
+    SQLFreeStmt
+    SQLGetConnectAttr
+    SQLGetData
+    SQLGetDescField
+    SQLGetDescRec
+    SQLGetDiagField
+    SQLGetDiagRec
+    SQLGetDiagRecW
+    SQLGetEnvAttr
+    SQLGetFunctions
+    SQLGetInfo
+    SQLGetInfoW
+    SQLGetStmtAttr
+    SQLGetTypeInfo
+    SQLGetTypeInfoW
+    SQLMoreResults
+    SQLNativeSql
+    SQLNumParams
+    SQLNumResultCols
+    SQLParamData
+    SQLPrepare
+    SQLPrepareW
+    SQLPrimaryKeys
+    SQLProcedureColumns
+    SQLProcedures
+    SQLPutData
+    SQLRowCount
+    SQLSetConnectAttr
+    SQLSetDescField
+    SQLSetDescRec
+    SQLSetEnvAttr
+    SQLSetPos
+    SQLSetStmtAttr
+    SQLSpecialColumns
+    SQLStatistics
+    SQLTables
+    SQLTablesW

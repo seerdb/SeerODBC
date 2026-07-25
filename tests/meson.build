@@ -96,11 +96,17 @@ if build_driver
   )
   test('type conversion', test_convert)
 
-  test_odbcini = executable('test_odbcini',
-    'unit/test_odbcini.c',
-    dependencies : [odbc_pure_dep],
-  )
-  test('odbc.ini reader', test_odbcini)
+  # The reader itself is portable and builds on Windows; only this test's harness
+  # (mkdtemp/setenv/POSIX temp paths) is not yet ported. File-based odbc.ini also
+  # matters less on Windows, where DSNs live in the registry - both land with the
+  # registry/DSN work in a later phase - so skip it there for now.
+  if host_machine.system() != 'windows'
+    test_odbcini = executable('test_odbcini',
+      'unit/test_odbcini.c',
+      dependencies : [odbc_pure_dep],
+    )
+    test('odbc.ini reader', test_odbcini)
+  endif
 
   # Driver-level integration test: through the Driver Manager against a live
   # server. Self-gating - exits 77 (skip) unless SEER_TEST_HOST/SERVICE/USER are
