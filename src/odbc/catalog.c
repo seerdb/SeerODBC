@@ -18,6 +18,7 @@
 #include <string.h>
 #include <strings.h>
 
+#include "compat.h"
 #include "odbc_internal.h"
 
 /* Duplicate a possibly non-NUL-terminated ODBC string; NULL/empty -> "%". */
@@ -60,8 +61,8 @@ SQLRETURN SQL_API SQLTables(SQLHSTMT     StatementHandle,
     }
 
     int all  = (types[0] == '\0' || strcmp(types, "%") == 0);
-    int want_table = all || strcasestr(types, "TABLE") != NULL;
-    int want_view  = all || strcasestr(types, "VIEW") != NULL;
+    int want_table = all || seer_strcasestr(types, "TABLE") != NULL;
+    int want_view  = all || seer_strcasestr(types, "VIEW") != NULL;
     if (!want_table && !want_view)         /* a specific, unknown type list */
         want_table = want_view = 0;
 

@@ -12,6 +12,8 @@
 
 #include <stddef.h>
 
+#include "odbc_platform.h"   /* <windows.h> before the ODBC headers on Windows */
+
 #include <sql.h>
 
 /* Convert a column value (val/vallen; binary if is_binary) to the C type

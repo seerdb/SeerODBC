@@ -14,6 +14,7 @@
 #include <strings.h>
 
 #include "charset.h"
+#include "compat.h"
 #include "convert.h"
 #include "odbc_internal.h"
 #include "sqlprep.h"
@@ -466,7 +467,7 @@ static SQLRETURN exec_finish(OdbcStmt *s)
                     const void *d = NULL; size_t l = 0; int isn = 1, isb = 0;
                     if (seer_stmt_set_row(s->core, r) == SEER_OK)
                         seer_stmt_get_data(s->core, s->rowid_col, &d, &l, &isn, &isb);
-                    s->rowids[r] = (d != NULL && !isn) ? strndup((const char *)d, l) : NULL;
+                    s->rowids[r] = (d != NULL && !isn) ? seer_strndup((const char *)d, l) : NULL;
                 }
             }
         }

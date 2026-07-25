@@ -13,6 +13,8 @@
 #ifndef SEERODBC_INTERNAL_H
 #define SEERODBC_INTERNAL_H
 
+#include "odbc_platform.h"   /* <windows.h> before the ODBC headers on Windows */
+
 #include <sql.h>
 #include <sqlext.h>
 
