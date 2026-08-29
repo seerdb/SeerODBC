@@ -13,8 +13,12 @@
 
 #include "transport.h"
 
+/* Active ANO channel (native encryption + data integrity); defined in ano.c. */
+typedef struct SeerAno SeerAno;
+
 struct SeerConn {
     SeerTransport *t;
+    SeerAno       *ano;            /* non-NULL once ANO encryption is active  */
     uint16_t       version;        /* negotiated TNS version (from ACCEPT)   */
     uint16_t       sdu;            /* negotiated Session Data Unit           */
     uint8_t        seq;            /* TTC sequence number, 1..127 (wrapping) */

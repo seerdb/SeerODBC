@@ -3,6 +3,7 @@
 # SPDX-License-Identifier: Apache-2.0
 
 tns_sources = files(
+  'ano.c',
   'auth.c',
   'json.c',
   'lob.c',

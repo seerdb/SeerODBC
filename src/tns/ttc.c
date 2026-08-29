@@ -5,6 +5,7 @@
  */
 #include "ttc.h"
 
+#include "ano.h"
 #include "auth.h"
 #include "conn.h"
 #include "log.h"
@@ -14,6 +15,8 @@
 #include "reader.h"
 #include "tns_consts.h"
 #include "writer.h"
+
+#include <openssl/crypto.h>   /* OPENSSL_cleanse */
 
 #include <stdio.h>
 #include <stdlib.h>
@@ -153,9 +156,15 @@ static const uint8_t TYPE_OVERRIDES[] = {
 SeerStatus seer_ttc_send(SeerConn *c, const uint8_t *msg, size_t len)
 {
     /* Body bytes per non-final fragment: SDU minus the 8-byte header and 2-byte
-     * data flags. With no SDU yet (pre-accept) send the whole message at once. */
-    size_t max_chunk = (c->sdu > TNS_HEADER_LEN + 2)
-                       ? (size_t)c->sdu - TNS_HEADER_LEN - 2 : len;
+     * data flags. With no SDU yet (pre-accept) send the whole message at once.
+     * With ANO active each fragment's body is the (larger) wrapped ciphertext,
+     * so we chunk the *plaintext* at SDU-64 (§33.3) and wrap per fragment. */
+    size_t max_chunk;
+    if (c->ano != NULL)
+        max_chunk = seer_ano_max_plain(c->sdu);
+    else
+        max_chunk = (c->sdu > TNS_HEADER_LEN + 2)
+                    ? (size_t)c->sdu - TNS_HEADER_LEN - 2 : len;
     if (max_chunk == 0)
         max_chunk = len ? len : 1;
 
@@ -165,11 +174,24 @@ SeerStatus seer_ttc_send(SeerConn *c, const uint8_t *msg, size_t len)
         bool   last      = remaining <= max_chunk;
         size_t chunk     = last ? remaining : max_chunk;
 
+        const uint8_t *payload = msg + off;
+        size_t         plen    = chunk;
+        uint8_t       *wrapped = NULL;
+        if (c->ano != NULL) {
+            SeerStatus wst = seer_ano_wrap(c->ano, msg + off, chunk, &wrapped, &plen);
+            if (wst != SEER_OK)
+                return wst;
+            payload = wrapped;
+        }
+
         SeerWriter w;
-        if (!seer_writer_init(&w, chunk + 2))
+        if (!seer_writer_init(&w, plen + 2)) {
+            free(wrapped);
             return SEER_ENOMEM;
+        }
         seer_writer_u16(&w, last ? TTC_DATA_FLAG_FINAL : TTC_DATA_FLAG_MORE);
-        seer_writer_bytes(&w, msg + off, chunk);
+        seer_writer_bytes(&w, payload, plen);
+        free(wrapped);
         if (!seer_writer_ok(&w)) {
             seer_writer_free(&w);
             return SEER_ENOMEM;
@@ -246,9 +268,26 @@ SeerStatus seer_ttc_recv(SeerConn *c, uint8_t **out, size_t *outlen)
             return SEER_EPROTO;
         }
 
-        seer_writer_bytes(&acc, body + 2, blen - 2);   /* drop data flags */
         size_t total = blen + TNS_HEADER_LEN;          /* full TNS packet size */
-        free(body);
+        /* Each DATA body (after the 2 data-flag bytes) is an independent unit.
+         * With ANO active it is encrypted + MAC'd, so decrypt/verify per packet
+         * before reassembly concatenates the plaintext (§33.3). */
+        if (c->ano != NULL) {
+            uint8_t *plain = NULL;
+            size_t   plen  = 0;
+            SeerStatus ust = seer_ano_unwrap(c->ano, body + 2, blen - 2, &plain, &plen);
+            free(body);
+            if (ust != SEER_OK) {
+                c->in_call = false;
+                seer_writer_free(&acc);
+                return ust;
+            }
+            seer_writer_bytes(&acc, plain, plen);
+            free(plain);
+        } else {
+            seer_writer_bytes(&acc, body + 2, blen - 2);   /* drop data flags */
+            free(body);
+        }
 
         bool fragment = c->sdu > 0 &&
                         (total == (size_t)c->sdu - 37 || total == (size_t)c->sdu - 81);
@@ -264,6 +303,77 @@ SeerStatus seer_ttc_recv(SeerConn *c, uint8_t **out, size_t *outlen)
     *out    = acc.buf;
     *outlen = acc.len;
     return SEER_OK;
+}
+
+/* Native network encryption negotiation (§33). Runs before PRO, over the
+ * plaintext session: send round 1 (offered algorithms), read the server's
+ * selection, and — when encryption was selected — complete the Diffie-Hellman
+ * exchange (round 2) and activate the connection's per-packet cipher + MAC. */
+SeerStatus seer_ttc_ano_negotiate(SeerConn *c)
+{
+    uint8_t   *req = NULL;
+    size_t     reqlen = 0;
+    SeerStatus st = seer_ano_build_round1(&req, &reqlen);
+    if (st != SEER_OK)
+        return st;
+    st = seer_ttc_send(c, req, reqlen);
+    free(req);
+    if (st != SEER_OK)
+        return st;
+
+    uint8_t *resp = NULL;
+    size_t   resplen = 0;
+    st = seer_ttc_recv(c, &resp, &resplen);
+    if (st != SEER_OK)
+        return st;
+
+    SeerAnoResponse ar;
+    st = seer_ano_parse_response(resp, resplen, &ar);
+    free(resp);
+    if (st != SEER_OK)
+        return st;
+
+    /* No encryption selected (bare-supported server, or no DH): stay plaintext. */
+    if (ar.enc_id == 0 || !ar.have_dh) {
+        seer_log(SEER_LOG_INFO, "TNS: ANO negotiated, no encryption (enc=%u)",
+                 ar.enc_id);
+        seer_ano_response_free(&ar);
+        return SEER_OK;
+    }
+
+    uint8_t *cpub = NULL, *sk = NULL;
+    size_t   cpub_len = 0, sk_len = 0;
+    st = seer_ano_dh(&ar, &cpub, &cpub_len, &sk, &sk_len);
+    if (st != SEER_OK) {
+        seer_ano_response_free(&ar);
+        return st;
+    }
+
+    uint8_t *r2 = NULL;
+    size_t   r2len = 0;
+    st = seer_ano_build_round2(cpub, cpub_len, &r2, &r2len);
+    if (st == SEER_OK) {
+        st = seer_ttc_send(c, r2, r2len);   /* last plaintext packet */
+        free(r2);
+    }
+    free(cpub);
+
+    if (st == SEER_OK) {
+        SeerAno *ch = NULL;
+        st = seer_ano_channel_new(ar.enc_id, ar.int_id, sk, sk_len,
+                                  ar.server_iv, ar.server_iv_len,
+                                  /*client_side=*/true, &ch);
+        if (st == SEER_OK) {
+            c->ano = ch;   /* every DATA packet from PRO onward is now wrapped */
+            seer_log(SEER_LOG_INFO, "TNS: ANO active (enc=%u integrity=%u)",
+                     ar.enc_id, ar.int_id);
+        }
+    }
+
+    OPENSSL_cleanse(sk, sk_len);
+    free(sk);
+    seer_ano_response_free(&ar);
+    return st;
 }
 
 uint8_t seer_ttc_next_seq(SeerConn *c)
