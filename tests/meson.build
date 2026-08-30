@@ -81,6 +81,14 @@ test_rpa_skip = executable('test_rpa_skip',
 )
 test('rpa skip (fv27)', test_rpa_skip)
 
+# Accept-and-reject stubs for features not on the thin wire: sharding (§37) + CQN
+# (§38). Pure offline: the reject paths take no network.
+test_stubs = executable('test_stubs',
+  'unit/test_stubs.c',
+  dependencies : [seertns_dep],
+)
+test('sharding + cqn stubs', test_stubs)
+
 # Live two-phase-commit (XA/TPC) test against the core API. Self-gating: exits 77
 # (skip) unless SEER_TEST_HOST/SERVICE/USER are set, so it is a no-op offline.
 test_tpc = executable('test_tpc',

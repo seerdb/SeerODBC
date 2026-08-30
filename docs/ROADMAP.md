@@ -313,15 +313,17 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
       no request-boundary verb, and connection pooling lives in the driver manager,
       not the driver; mirrors the XA rationale above. (oracledb ties this to its own
       pool acquire/release; a bare driver leaves the begin/end to the caller.)
-- [ ] Sharding — **not on the thin wire** (§37). `shardingkey`/`supershardingkey`
-      are an OCI-client capability; a pure-protocol client has no message to carry
-      them (a thin reference client rejects them locally, sending zero bytes). There
-      is nothing to emit; if surfaced, the honest behaviour is a "not supported"
-      error, like the reference thin drivers.
-- [ ] Continuous Query Notification — **not on the thin wire** (§38). CQN needs the
-      server to open a callback connection back to a client-run listener, which a
-      thin request/response client cannot host; the reference thin driver rejects
-      `subscribe()`. Nothing to emit.
+- [x] Sharding — **not on the thin wire** (§37); accept-and-reject stub.
+      `shardingkey`/`supershardingkey` are an OCI-client capability (shard routing
+      happens below the TTC/TNS protocol), so a pure-protocol client has no message
+      to carry them. The two `SeerConnParams` fields are accepted for API parity;
+      `seer_connect` rejects a non-empty key up front with SEER_ENOTIMPL (no wire
+      traffic) rather than silently ignoring it, matching the reference thin drivers.
+- [x] Continuous Query Notification — **not on the thin wire** (§38); accept-and-
+      reject stub. CQN needs the server to open a callback connection back to a
+      client-run listener, which a thin request/response client cannot host.
+      `seer_subscribe` / `seer_unsubscribe` exist for API parity and return
+      SEER_ENOTIMPL with an explanatory `seer_last_error`.
 - [ ] Application Continuity
 
 ## Docs & testing
