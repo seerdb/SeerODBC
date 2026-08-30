@@ -1336,6 +1336,22 @@ static SeerStatus skip_server_piggyback(SeerReader *r)
     } else if (opcode == TNS_SVR_PIG_OS_PID_MTS) {
         (void)seer_dec_sb4(r);                 /* ub2                    */
         seer_skip_chunked(r);                  /* pid bytes              */
+    } else if (opcode == TNS_SVR_PIG_SYNC) {
+        /* Sessionless-txn sync state (§31): keyword-value pairs (keyword 201 =
+         * the transaction id) the server piggybacks on the next call's response
+         * while a sessionless txn is active. The values aren't needed - consume
+         * the block byte-for-byte so the real tokens follow. The pair loop is
+         * framed like SESS_RET but the length ub1 is always present. */
+        (void)seer_dec_sb4(r);                 /* number of DTYs (ub2)   */
+        (void)seer_reader_u8(r);               /* length of DTYs (ub1)   */
+        int64_t npairs = seer_dec_sb4(r);      /* number of pairs (ub2)  */
+        (void)seer_reader_u8(r);               /* length (ub1)           */
+        for (int64_t i = 0; i < npairs && seer_reader_ok(r); i++) {
+            if (seer_dec_sb4(r) > 0) seer_skip_chunked(r);   /* text value   */
+            if (seer_dec_sb4(r) > 0) seer_skip_chunked(r);   /* binary value */
+            (void)seer_dec_sb4(r);             /* keyword num (ub2)      */
+        }
+        (void)seer_dec_sb4(r);                 /* overall flags (ub4)    */
     } else {
         return SEER_EPROTO;                    /* unknown piggyback opcode */
     }
@@ -4708,8 +4724,8 @@ static void tpc_xid_payload(SeerWriter *w, const SeerXid *xid)
 }
 
 /* Build a TXN_SWITCH (begin/end) message, replaying any stored context. */
-static SeerStatus tpc_build_switch(SeerConn *c, SeerWriter *w, uint32_t op,
-                                   const SeerXid *xid, uint32_t flags, uint32_t timeout)
+SeerStatus seer_tpc_build_switch(SeerConn *c, SeerWriter *w, uint32_t op,
+                                 const SeerXid *xid, uint32_t flags, uint32_t timeout)
 {
     if (!seer_writer_init(w, 256))
         return SEER_ENOMEM;
@@ -4829,7 +4845,7 @@ SeerStatus seer_tpc_begin(SeerConn *conn, const SeerXid *xid, uint32_t flags,
     if (conn->field_version < TTC_FIELD_VERSION_12_1)
         return SEER_ENOTIMPL;                       /* TPC is 12c+ */
     SeerWriter w;
-    SeerStatus st = tpc_build_switch(conn, &w, TNS_TPC_TXN_START, xid, flags, timeout);
+    SeerStatus st = seer_tpc_build_switch(conn, &w, TNS_TPC_TXN_START, xid, flags, timeout);
     if (st != SEER_OK)
         return st;
     uint8_t *ctx = NULL; size_t ctxlen = 0;
@@ -4846,7 +4862,7 @@ SeerStatus seer_tpc_end(SeerConn *conn, const SeerXid *xid, uint32_t flags)
     if (conn == NULL || !xid_valid(xid))
         return SEER_EPARAM;
     SeerWriter w;
-    SeerStatus st = tpc_build_switch(conn, &w, TNS_TPC_TXN_DETACH, xid, flags, 0);
+    SeerStatus st = seer_tpc_build_switch(conn, &w, TNS_TPC_TXN_DETACH, xid, flags, 0);
     if (st != SEER_OK)
         return st;
     st = tpc_call(conn, &w, false, NULL, NULL, NULL);
@@ -4916,6 +4932,98 @@ SeerStatus seer_tpc_rollback(SeerConn *conn, const SeerXid *xid)
     if (st != SEER_OK)
         return st;
     return (state == TNS_TPC_TXN_STATE_ABORTED) ? SEER_OK : SEER_EPROTO;
+}
+
+/* ---- Sessionless transactions (§31, 23ai+) ------------------------------ */
+
+/* Send a sessionless TXN_SWITCH (start/resume/detach) and consume its reply.
+ * Reuses the XA switch builder + reply parser (the response shape is the same
+ * TTI_RPA + trailing OER); the START context blob is read and discarded, since a
+ * sessionless transaction is identified by its id, not a replayed context. */
+static SeerStatus sessionless_switch(SeerConn *conn, uint32_t op,
+                                     const SeerXid *xid, uint32_t flags,
+                                     uint32_t timeout)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (conn->field_version < TTC_FIELD_VERSION_23_1)
+        return SEER_ENOTIMPL;                  /* sessionless txns are 23ai+ */
+    SeerWriter w;
+    SeerStatus st = seer_tpc_build_switch(conn, &w, op, xid, flags, timeout);
+    if (st != SEER_OK)
+        return st;
+    if (op == TNS_TPC_TXN_START) {
+        uint8_t *ctx = NULL; size_t ctxlen = 0;
+        st = tpc_call(conn, &w, true, &ctx, &ctxlen, NULL);
+        free(ctx);                             /* not replayed for sessionless */
+    } else {
+        st = tpc_call(conn, &w, false, NULL, NULL, NULL);
+    }
+    return st;
+}
+
+/* Reject a sessionless transaction id that is empty or over the 64-byte cap. */
+static bool sessionless_id_valid(const uint8_t *id, size_t len)
+{
+    return id != NULL && len > 0 && len <= TNS_TPC_SESSIONLESS_ID_MAX;
+}
+
+SeerStatus seer_txn_begin_sessionless(SeerConn *conn, const uint8_t *txn_id,
+                                      size_t txn_id_len, uint32_t timeout)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (!sessionless_id_valid(txn_id, txn_id_len))
+        return SEER_EPARAM;
+    if (conn->sessionless_active)
+        return SEER_EPARAM;                    /* one sessionless txn at a time */
+    SeerXid xid = {
+        .format_id = TNS_TPC_SESSIONLESS_FORMAT_ID,
+        .gtrid = txn_id, .gtrid_len = (int)txn_id_len,
+        .bqual = NULL,   .bqual_len = 0,
+    };
+    SeerStatus st = sessionless_switch(conn, TNS_TPC_TXN_START, &xid,
+                                       SEER_TPC_BEGIN_NEW | TNS_TPC_FLAGS_SESSIONLESS,
+                                       timeout);
+    if (st == SEER_OK)
+        conn->sessionless_active = true;
+    return st;
+}
+
+SeerStatus seer_txn_resume_sessionless(SeerConn *conn, const uint8_t *txn_id,
+                                       size_t txn_id_len, uint32_t timeout)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (!sessionless_id_valid(txn_id, txn_id_len))
+        return SEER_EPARAM;
+    if (conn->sessionless_active)
+        return SEER_EPARAM;
+    SeerXid xid = {
+        .format_id = TNS_TPC_SESSIONLESS_FORMAT_ID,
+        .gtrid = txn_id, .gtrid_len = (int)txn_id_len,
+        .bqual = NULL,   .bqual_len = 0,
+    };
+    SeerStatus st = sessionless_switch(conn, TNS_TPC_TXN_START, &xid,
+                                       SEER_TPC_BEGIN_RESUME | TNS_TPC_FLAGS_SESSIONLESS,
+                                       timeout);
+    if (st == SEER_OK)
+        conn->sessionless_active = true;
+    return st;
+}
+
+SeerStatus seer_txn_suspend_sessionless(SeerConn *conn)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (!conn->sessionless_active)
+        return SEER_EPARAM;                    /* nothing to suspend */
+    /* DETACH with the SESSIONLESS flag and no xid attached. */
+    SeerStatus st = sessionless_switch(conn, TNS_TPC_TXN_DETACH, NULL,
+                                       TNS_TPC_FLAGS_SESSIONLESS, 0);
+    if (st == SEER_OK)
+        conn->sessionless_active = false;
+    return st;
 }
 
 /* ---- Advanced Queuing (AQ, #128) ---------------------------------------- */

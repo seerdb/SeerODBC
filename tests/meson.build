@@ -66,6 +66,13 @@ test_reqbound = executable('test_reqbound',
 )
 test('request boundaries', test_reqbound)
 
+# Sessionless-transaction TXN_SWITCH framing known-answer test (§31).
+test_sessionless = executable('test_sessionless',
+  'unit/test_sessionless.c',
+  dependencies : [seertns_dep],
+)
+test('sessionless transactions', test_sessionless)
+
 # Live two-phase-commit (XA/TPC) test against the core API. Self-gating: exits 77
 # (skip) unless SEER_TEST_HOST/SERVICE/USER are set, so it is a no-op offline.
 test_tpc = executable('test_tpc',
@@ -80,6 +87,13 @@ test_reqbound_live = executable('reqbound_test',
   dependencies : [seertns_dep],
 )
 test('request boundaries (live)', test_reqbound_live, is_parallel : false, timeout : 60)
+
+# Live sessionless-transaction test (§31, core API). Self-gating: exits 77 offline.
+test_sessionless_live = executable('sessionless_test',
+  'odbc/sessionless_test.c',
+  dependencies : [seertns_dep],
+)
+test('sessionless transactions (live)', test_sessionless_live, is_parallel : false, timeout : 60)
 
 # Live SQL OBJECT bind test (core API). Self-gating: exits 77 (skip) offline.
 test_objbind = executable('test_objbind',

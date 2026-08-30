@@ -26,6 +26,16 @@
 /* Server-side piggyback opcodes (DRCP, #130). */
 #define TNS_SVR_PIG_OS_PID_MTS  2
 #define TNS_SVR_PIG_SESS_RET    4
+#define TNS_SVR_PIG_SYNC        5   /* sessionless-txn sync state (§31, #133) */
+
+/* Sessionless transactions (§31, #133, 23ai+): reuse the TPC SWITCH (103) with
+ * the SESSIONLESS flag OR'd into the START/DETACH flags and a magic format-id in
+ * the xid slot (the user txn id goes in the gtrid, bqual empty). Commit/rollback
+ * are ordinary TTI_COMMIT/TTI_ROLLBACK. START flags reuse SEER_TPC_BEGIN_NEW /
+ * _RESUME (0x01 / 0x04). */
+#define TNS_TPC_FLAGS_SESSIONLESS      0x10
+#define TNS_TPC_SESSIONLESS_FORMAT_ID  0x4E5C3E
+#define TNS_TPC_SESSIONLESS_ID_MAX     64
 
 /* Two-phase commit / XA (TPC, #131). Two function calls carry it: SWITCH attaches
  * or detaches a transaction branch, CHANGE_STATE drives prepare/commit/abort. */

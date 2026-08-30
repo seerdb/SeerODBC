@@ -1328,6 +1328,9 @@ static SeerStatus seer_ttc_tran(SeerConn *conn, uint8_t func)
     if (st != SEER_OK)
         return st;
     free(resp);
+    /* An ordinary commit/rollback ends any active sessionless transaction (§31);
+     * the server rides a SYNC piggyback on this response, harmlessly discarded. */
+    conn->sessionless_active = false;
     return SEER_OK;
 }
 

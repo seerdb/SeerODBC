@@ -12,6 +12,7 @@
 #include <stdint.h>
 
 #include "transport.h"
+#include "writer.h"
 
 /* Active ANO channel (native encryption + data integrity); defined in ano.c. */
 typedef struct SeerAno SeerAno;
@@ -31,6 +32,9 @@ struct SeerConn {
     bool           req_boundaries;
     uint8_t        session_state;
     bool           in_request;
+    /* Sessionless transactions (§31): a sessionless txn is currently begun/resumed
+     * on this connection (client-side tracking, like seerdb). */
+    bool           sessionless_active;
     uint32_t       server_release; /* packed AUTH_VERSION_NO                  */
     char          *last_error;     /* last ORA-NNNNN message (malloc'd)       */
     volatile bool  in_call;        /* blocked in seer_ttc_recv (cancel window) */
@@ -55,5 +59,12 @@ struct SeerConn {
  * server cursors themselves die with the session. Defined in stmt.c, which owns
  * the SeerColumn type. */
 void seer_stmt_cache_clear(struct SeerConn *conn);
+
+/* Build a TPC/sessionless TXN_SWITCH message (function 103) into `w`: the
+ * fun-header, op, the (optional, NULL) stored context flag, the xid descriptor +
+ * 128-byte payload, flags and timeout. Shared by the XA and sessionless paths;
+ * exposed (non-static) so the offline KAT can pin the sessionless framing. */
+SeerStatus seer_tpc_build_switch(struct SeerConn *c, SeerWriter *w, uint32_t op,
+                                 const SeerXid *xid, uint32_t flags, uint32_t timeout);
 
 #endif /* SEER_TNS_CONN_H */
