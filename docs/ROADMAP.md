@@ -44,8 +44,14 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
       servers negotiate down (10g→313, 11g→314, 9i→312) and keep legacy framing.
       The 319 CONNECT carries the large-SDU trailer (32-bit SDU/TDU + connect
       flags) and the accept's ub4 SDU is read from offset 24. Validated live +
-      ASan across 10g/11g/21c/26ai incl. fragmentation. (Stage 1 of pipelining
-      §32; end-of-response framing #155 + the pipeline burst ride on top.)
+      ASan across 10g/11g/21c/26ai incl. fragmentation. (Stage 1 of pipelining §32.)
+- [x] End-of-response framing (§32/#155) — stage 2 of pipelining. A >= 318 accept
+      carries the flags2 HAS_END_OF_RESPONSE bit; when set (23ai/26ai) we opt in
+      via the DTY compile_caps[40] bit 0x20, and the server then terminates every
+      response with a TTI_END_OF_RESPONSE (29) token (handled as a terminal in the
+      response parser). Prerequisite for the pipeline burst. Validated live + ASan
+      on an EOR-active 26ai (full integration suite); 21c/11g don't advertise it
+      and are unaffected.
 - [x] TLS / TCPS transport — OpenSSL client wraps the socket (SSL=1 or
       PROTOCOL=TCPS); cert verification on by default (TLSCA for a custom CA,
       TLSVERIFY=0 to disable). Validated fv4→fv24 through a terminating proxy

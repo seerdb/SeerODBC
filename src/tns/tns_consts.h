@@ -22,6 +22,7 @@
 #define TTI_BVC  21   /* bit vector for changed cols */
 #define TTI_SVR_PIGGYBACK 23 /* server-side session-state piggyback (DRCP) */
 #define TTI_IRD  27   /* implicit result set descriptor (12c+) */
+#define TTI_END_OF_RESPONSE 29 /* per-response terminator (EOR framing, #155) */
 
 /* Server-side piggyback opcodes (DRCP, #130). */
 #define TNS_SVR_PIG_OS_PID_MTS  2
@@ -130,6 +131,16 @@
 #define TNS_CCAP_TTC4_EXPLICIT_BOUNDARY     0x40
 #define TNS_RCAP_TTC                        6
 #define TNS_RCAP_TTC_SESSION_STATE_OPS      0x10
+
+/* End-of-response framing (§32/#155): opt in by setting compile_caps[40] bit
+ * 0x20 in the DTY, but only when the ACCEPT advertised support — the extended
+ * flags2 ub4 at accept body offset 33 (present at version >= 318) carries the
+ * HAS_END_OF_RESPONSE bit. Once negotiated the server terminates every response
+ * with a TTI_END_OF_RESPONSE (29) token. Prerequisite for request pipelining. */
+#define TNS_CCAP_TTC4_END_OF_RESPONSE       0x20
+#define TNS_VERSION_MIN_OOB_CHECK           318
+#define TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE 0x02000000u
+#define TNS_ACCEPT_FLAGS2_OFFSET            33
 
 /* TTC field versions. 11.2 is the long-standing default; 12.1 is the threshold
  * at which the 12c+ wire forms (UB2 datatype table, extended OER, oaccolid in

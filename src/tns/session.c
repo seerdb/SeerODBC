@@ -19,6 +19,7 @@
 #include "netcompat.h"   /* gethostname(): <unistd.h> on POSIX, Winsock on Windows */
 #include "packet.h"
 #include "reader.h"
+#include "tns_consts.h"
 #include "transport.h"
 #include "ttc.h"
 #include "writer.h"
@@ -275,6 +276,16 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
                 if (large_sdu > 0 && large_sdu <= 0xFFFF)
                     conn->sdu = (uint16_t)large_sdu;
             }
+            /* End-of-response framing (§32/#155): a >= 318 accept carries the
+             * extended flags2 ub4 at body offset 33; its HAS_END_OF_RESPONSE bit
+             * says the server will honour the EOR cap we opt into at DTY time. */
+            if (conn->version >= TNS_VERSION_MIN_OOB_CHECK &&
+                rlen >= TNS_ACCEPT_FLAGS2_OFFSET + 4) {
+                const uint8_t *f = rbody + TNS_ACCEPT_FLAGS2_OFFSET;
+                uint32_t flags2 = (uint32_t)f[0] << 24 | (uint32_t)f[1] << 16 |
+                                  (uint32_t)f[2] << 8  | (uint32_t)f[3];
+                conn->supports_eor = (flags2 & TNS_ACCEPT_FLAG_HAS_END_OF_RESPONSE) != 0;
+            }
             /* ANO gate (§33.1): once we advertised ANO-capable, negotiate iff
              * the accept's ACFL0 (off 14) bit0 is set, bit2 clear, and ACFL1
              * (off 15) bit3 clear. A server that only supports ANO answers with
@@ -290,9 +301,9 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
                 seer_transport_set_large_frames(conn->t, 1);
 
             seer_log(SEER_LOG_INFO,
-                     "TNS: ACCEPT from %s:%u (version=%u, sdu=%u, large=%d)",
+                     "TNS: ACCEPT from %s:%u (version=%u, sdu=%u, large=%d, eor=%d)",
                      cur_host, cur_port, conn->version, conn->sdu,
-                     conn->version >= TNS_VERSION_MIN_LARGE_SDU);
+                     conn->version >= TNS_VERSION_MIN_LARGE_SDU, conn->supports_eor);
             break;   /* TNS session established; proceed to TTC negotiation */
         }
 
