@@ -462,8 +462,10 @@ static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv,
 static const uint8_t O3_COMPILE_CAPS[21] = { [17] = 0x03 };
 static const uint8_t O3_RUNTIME_CAPS[1]  = { 0x02 };
 
-/* Build the TTI_DTY message (token, charset in/out, flag, caps, type table). */
-static SeerStatus build_dty(SeerWriter *w, uint8_t fv)
+/* Build the TTI_DTY message (token, charset in/out, flag, caps, type table).
+ * `eor` opts into end-of-response framing (§32/#155) by setting the CCAP_TTC4
+ * bit; the caller passes it only when the accept advertised support. */
+static SeerStatus build_dty(SeerWriter *w, uint8_t fv, bool eor)
 {
     bool is12c = fv >= TTC_FIELD_VERSION_12_1;
     if (!seer_writer_init(w, is12c ? 2600 : 1300))
@@ -483,6 +485,8 @@ static SeerStatus build_dty(SeerWriter *w, uint8_t fv)
         uint8_t caps[sizeof COMPILE_CAPS_12C];
         memcpy(caps, COMPILE_CAPS_12C, sizeof caps);
         caps[7] = fv;                                      /* CCAP_FIELD_VERSION */
+        if (eor)                                           /* §32/#155 opt-in */
+            caps[TNS_CCAP_TTC4] |= TNS_CCAP_TTC4_END_OF_RESPONSE;
         seer_writer_u8(w, (uint8_t)sizeof caps);
         seer_writer_bytes(w, caps, sizeof caps);
         seer_writer_u8(w, (uint8_t)sizeof RUNTIME_CAPS_12C);
@@ -733,7 +737,7 @@ static SeerStatus fast_auth_login(SeerConn *conn, const SeerConnParams *params,
                                   SeerAuthChallenge *ch)
 {
     SeerWriter dty, sess, bundle;
-    SeerStatus st = build_dty(&dty, conn->field_version);
+    SeerStatus st = build_dty(&dty, conn->field_version, conn->supports_eor);
     if (st != SEER_OK)
         return st;
     st = build_sess(conn, params, &sess);
@@ -848,7 +852,7 @@ SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
 
     /* --- TTI_DTY: data-type negotiation --- */
     SeerWriter dty;
-    st = build_dty(&dty, conn->field_version);
+    st = build_dty(&dty, conn->field_version, conn->supports_eor);
     if (st != SEER_OK)
         return st;
     st = seer_ttc_send(conn, dty.buf, dty.len);

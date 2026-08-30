@@ -1422,6 +1422,12 @@ static SeerStatus parse_response(SeerStmt *stmt, const uint8_t *buf, size_t len,
         case TTI_STA:
             got_oer = true;            /* treat as terminal */
             break;
+        case TTI_END_OF_RESPONSE:
+            /* EOR framing (§32/#155): the per-response terminator. It normally
+             * trails the OER/STA (which already ended the loop), but treat it as
+             * a terminal too so an EOR-only response ends cleanly. */
+            got_oer = true;
+            break;
         default:
             seer_log(SEER_LOG_ERROR, "stmt: unexpected response token %u", tok);
             st = SEER_EPROTO;

@@ -32,6 +32,10 @@ struct SeerConn {
     bool           req_boundaries;
     uint8_t        session_state;
     bool           in_request;
+    /* End-of-response framing (§32/#155): the accept advertised it (flags2 bit),
+     * so we opt in via the DTY cap and the server terminates every response with
+     * a TTI_END_OF_RESPONSE (29) token. Prerequisite for request pipelining. */
+    bool           supports_eor;
     /* Sessionless transactions (§31): a sessionless txn is currently begun/resumed
      * on this connection (client-side tracking, like seerdb). */
     bool           sessionless_active;
