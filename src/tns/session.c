@@ -30,16 +30,22 @@
 #include <unistd.h>
 
 /* TNS_CONNECT fixed-header constants (PROTOCOL.md §2.1). */
-#define TNS_VERSION_DESIRED   0x0139   /* 313 - 11g */
+#define TNS_VERSION_DESIRED   0x013F   /* 319 - large-SDU handshake (#155) */
+/* A negotiated version >= 315 switches to the 4-byte ("large") packet length
+ * (§1.1); older servers (10g/11g cap at 313, 9i at 312) stay on legacy framing. */
+#define TNS_VERSION_MIN_LARGE_SDU 315
 /* Lowest-compatible version we accept. Kept low (300) so pre-11g servers can
  * settle at their own ceiling - Oracle 9i's max is 312, so a 313 floor would make
  * it reject the CONNECT. Newer servers still negotiate up to TNS_VERSION_DESIRED. */
 #define TNS_VERSION_MIN_COMPAT 0x012C  /* 300 */
+#define TNS_GSO_OPTIONS       0x0401   /* global service options (319 handshake) */
 #define TNS_SDU_DEFAULT       0x2000   /* 8192 */
-#define TNS_TDU_DEFAULT       0xFFFF   /* 65535 */
 #define TNS_PROTO_CHARS       0x4F98
 #define TNS_HW_BYTE_ORDER     0x0001   /* big-endian */
-#define TNS_CONNECT_DATA_OFF  0x003A   /* 58 = 8-byte TNS header + 50-byte body */
+/* Connect-data offset from the packet start (8-byte TNS header + 66-byte body).
+ * The 319 body is the legacy 50 bytes plus a 16-byte trailer (large SDU/TDU +
+ * two connect-flag words) that sits before the connect descriptor (#155). */
+#define TNS_CONNECT_DATA_OFF  74
 /* ANO-capable (§33.1). The legacy 0x8484 ("disabled") makes an ANO server RESET
  * after negotiation round 1; advertising 0x0101 commits us to running the ANO
  * negotiation (gated on the accept's ACFL flags) before PRO. */
@@ -96,9 +102,9 @@ static SeerStatus build_connect_body(const SeerConnParams *p, SeerWriter *w)
 
     seer_writer_u16(w, TNS_VERSION_DESIRED);   /* off  0: protocol version     */
     seer_writer_u16(w, TNS_VERSION_MIN_COMPAT);/* off  2: lowest compatible    */
-    seer_writer_u16(w, 0x0000);                /* off  4: global svc options   */
+    seer_writer_u16(w, TNS_GSO_OPTIONS);       /* off  4: global svc options   */
     seer_writer_u16(w, TNS_SDU_DEFAULT);       /* off  6: SDU                  */
-    seer_writer_u16(w, TNS_TDU_DEFAULT);       /* off  8: TDU                  */
+    seer_writer_u16(w, TNS_SDU_DEFAULT);       /* off  8: TDU (= SDU at v319)  */
     seer_writer_u16(w, TNS_PROTO_CHARS);       /* off 10: proto characteristics*/
     seer_writer_u16(w, 0x0000);                /* off 12: max packets before ACK*/
     seer_writer_u16(w, TNS_HW_BYTE_ORDER);     /* off 14: hardware byte order  */
@@ -108,8 +114,14 @@ static SeerStatus build_connect_body(const SeerConnParams *p, SeerWriter *w)
     seer_writer_u16(w, TNS_ANO_FLAGS);         /* off 24: ANO flags            */
     for (int i = 0; i < TNS_CONNECT_HDR_RSVD; i++)
         seer_writer_u8(w, 0x00);               /* off 26..50: reserved         */
+    /* 319-era trailer (off 50..66): 32-bit SDU + TDU, then connect_flags_1 (0)
+     * and connect_flags_2 (1 = OOB check), per the reference client (#155). */
+    seer_writer_u32(w, TNS_SDU_DEFAULT);       /* off 50: large SDU (ub4)      */
+    seer_writer_u32(w, TNS_SDU_DEFAULT);       /* off 54: large TDU (ub4)      */
+    seer_writer_u32(w, 0x00000000);            /* off 58: connect flags 1      */
+    seer_writer_u32(w, 0x00000001);            /* off 62: connect flags 2      */
 
-    seer_writer_bytes(w, desc, (size_t)dlen);  /* off 50: connect descriptor   */
+    seer_writer_bytes(w, desc, (size_t)dlen);  /* off 66: connect descriptor   */
     seer_writer_patch_u16(w, 16, (uint16_t)dlen);
 
     if (!seer_writer_ok(w)) {
@@ -252,7 +264,17 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
             seer_reader_init(&r, rbody, rlen);
             conn->version = seer_reader_u16(&r);  /* body off 0 */
             (void)seer_reader_u16(&r);            /* body off 2: service options */
-            conn->sdu = seer_reader_u16(&r);      /* body off 4 */
+            uint16_t legacy_sdu = seer_reader_u16(&r);   /* body off 4 (ub2)   */
+            /* A >= 315 ("large SDU") accept carries the real negotiated SDU as a
+             * ub4 at body offset 24; below that the legacy ub2 at offset 4 is it. */
+            conn->sdu = legacy_sdu;
+            if (conn->version >= TNS_VERSION_MIN_LARGE_SDU && rlen >= 28) {
+                uint32_t large_sdu = (uint32_t)rbody[24] << 24 |
+                                     (uint32_t)rbody[25] << 16 |
+                                     (uint32_t)rbody[26] << 8  | (uint32_t)rbody[27];
+                if (large_sdu > 0 && large_sdu <= 0xFFFF)
+                    conn->sdu = (uint16_t)large_sdu;
+            }
             /* ANO gate (§33.1): once we advertised ANO-capable, negotiate iff
              * the accept's ACFL0 (off 14) bit0 is set, bit2 clear, and ACFL1
              * (off 15) bit3 clear. A server that only supports ANO answers with
@@ -262,8 +284,15 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
             ano_gate = (acfl0 & 0x01) && !(acfl0 & 0x04) && !(acfl1 & 0x08);
             free(rbody);
 
-            seer_log(SEER_LOG_INFO, "TNS: ACCEPT from %s:%u (version=%u, sdu=%u)",
-                     cur_host, cur_port, conn->version, conn->sdu);
+            /* The ACCEPT itself is legacy-framed; from here on, a version >= 315
+             * server frames every packet with the 4-byte length (§1.1, #155). */
+            if (conn->version >= TNS_VERSION_MIN_LARGE_SDU)
+                seer_transport_set_large_frames(conn->t, 1);
+
+            seer_log(SEER_LOG_INFO,
+                     "TNS: ACCEPT from %s:%u (version=%u, sdu=%u, large=%d)",
+                     cur_host, cur_port, conn->version, conn->sdu,
+                     conn->version >= TNS_VERSION_MIN_LARGE_SDU);
             break;   /* TNS session established; proceed to TTC negotiation */
         }
 

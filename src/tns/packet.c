@@ -20,14 +20,21 @@ SeerStatus seer_packet_send(SeerTransport *t, uint8_t type,
     if (payload_len > TNS_MAX_PAYLOAD)
         return SEER_EPARAM;   /* fragmentation belongs to the TTC layer */
 
-    uint16_t total = (uint16_t)(TNS_HEADER_LEN + payload_len);
-    uint8_t hdr[TNS_HEADER_LEN] = {
-        (uint8_t)(total >> 8), (uint8_t)total,  /* packet length     */
-        0x00, 0x00,                             /* packet flags      */
-        type,                                   /* packet type       */
-        0x00,                                   /* flags             */
-        0x00, 0x00,                             /* header checksum   */
-    };
+    /* Two header layouts, both 8 bytes with the type at byte 4: legacy (ub2
+     * length + ub2 checksum) or large-SDU (ub4 length, replacing the legacy
+     * length + checksum) once the negotiated version >= 315 (§1.1, #155). */
+    uint32_t total = (uint32_t)(TNS_HEADER_LEN + payload_len);
+    uint8_t hdr[TNS_HEADER_LEN];
+    if (seer_transport_large_frames(t)) {
+        hdr[0] = (uint8_t)(total >> 24); hdr[1] = (uint8_t)(total >> 16);
+        hdr[2] = (uint8_t)(total >> 8);  hdr[3] = (uint8_t)total;
+    } else {
+        hdr[0] = (uint8_t)(total >> 8);  hdr[1] = (uint8_t)total;
+        hdr[2] = 0x00;                   hdr[3] = 0x00;   /* packet flags */
+    }
+    hdr[4] = type;
+    hdr[5] = 0x00;                       /* flags           */
+    hdr[6] = 0x00; hdr[7] = 0x00;        /* header checksum */
 
     SeerStatus st = seer_transport_write_all(t, hdr, sizeof hdr);
     if (st != SEER_OK)
@@ -50,7 +57,12 @@ SeerStatus seer_packet_recv(SeerTransport *t, uint8_t *out_type,
     if (st != SEER_OK)
         return st;
 
-    uint16_t total = (uint16_t)((hdr[0] << 8) | hdr[1]);
+    /* Large-SDU framing reads the length from the 4-byte field; legacy from the
+     * 2-byte field. The type is at byte 4 in both. */
+    uint32_t total = seer_transport_large_frames(t)
+        ? ((uint32_t)hdr[0] << 24 | (uint32_t)hdr[1] << 16 |
+           (uint32_t)hdr[2] << 8  | (uint32_t)hdr[3])
+        : ((uint32_t)hdr[0] << 8  | (uint32_t)hdr[1]);
     uint8_t  type  = hdr[4];
     if (total < TNS_HEADER_LEN) {
         seer_log(SEER_LOG_ERROR, "packet: bogus length %u (< header)", total);
