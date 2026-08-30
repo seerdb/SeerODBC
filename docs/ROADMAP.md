@@ -287,6 +287,18 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
       12c+ (ENOTIMPL below). Validated 21c/23ai: full 2PC commit is durable
       cross-connection, rollback discards. Exposed via the core API (Unix ODBC
       has no standard XA binding), not the SQL* surface.
+- [x] Sessionless transactions (§31, 23ai+) — a transaction that lives in the DB,
+      not the session: `seer_txn_begin_sessionless` / `_resume_sessionless` /
+      `_suspend_sessionless` (core API). Reuses the TPC SWITCH (103) machinery
+      with the magic format-id 0x4E5C3E in the xid slot and the SESSIONLESS flag
+      (0x10) OR'd into START (NEW/RESUME) / DETACH — no new function code; commit
+      and rollback are ordinary. While a sessionless txn is active the server
+      rides a SYNC piggyback (opcode 5) on the next call's response, consumed
+      byte-for-byte in `skip_server_piggyback`. ENOTIMPL below fv23.1 (so 21c
+      too). The switch framing is pinned byte-for-byte to seerdb (test_sessionless);
+      the full suspend-on-A / resume+commit-on-B lifecycle (incl. cross-session
+      isolation + durability, and the SYNC piggyback) runs live on 23ai in CI.
+      Core API, not the SQL* surface (like XA).
 - [x] Request boundaries (§35) — bracket a logical request so the server can reset
       session state between requests (a DRCP / pool optimisation). Core `seer_request_begin`
       / `seer_request_end` emit a one-shot func-176 `SESSION_STATE` piggyback (the
@@ -357,19 +369,15 @@ The object/collection arc (incl. the deep tail: collections-of-objects,
 objects-with-collection-attributes, OUT associative arrays), Advanced Queuing,
 XA/2PC, TLS/TCPS, proxy auth + DRCP, native JSON/VECTOR binds, XMLType fetch/bind
 (incl. LOB-backed), statement caching, **Oracle 9i (fv2 / O3LOGON / TTI_ALL7)**,
-**ANO native encryption (§33)** and **request boundaries (§35)** have all landed —
-matrix-validated. The driver spans field versions 2–24 (9i → 23ai). Reference-backed
-items still open, from the latest seerdb/PROTOCOL.md sync:
+**ANO native encryption (§33)**, **request boundaries (§35)** and **sessionless
+transactions (§31)** have all landed — matrix-validated. The driver spans field
+versions 2–24 (9i → 23ai). Reference-backed items still open, from the latest
+seerdb/PROTOCOL.md sync:
 
-1. **Sessionless transactions (§31, 23ai+)** — a transaction that lives in the DB
-   and can be suspended on one session and resumed/committed on another. Reuses the
-   existing TPC machinery (SWITCH 103) with a magic format-id (0x4E5C3E) and the
-   SESSIONLESS flag, plus consuming the server SYNC piggyback (opcode 5). Reference:
-   seerdb `connection.py` `_sessionless_switch` / `PROTOCOL.md` §31.
-2. **Request pipelining (§32, 21c+)** — batch exec/fetch ops into one token-tagged
+1. **Request pipelining (§32, 21c+)** — batch exec/fetch ops into one token-tagged
    burst read back in a single round trip (func 199/200, end-of-response framing).
    The heaviest of the open items (new token framing + a custom pipelined reader).
-3. **Token auth — OAuth2 / OCI IAM (§20.6)** and **end-user security context
+2. **Token auth — OAuth2 / OCI IAM (§20.6)** and **end-user security context
    (§34)** — cloud/tcps-gated; validation needs a real IAM token / 26ai TLS path.
 
 Not on the thin wire (documented above, nothing to emit): **sharding** (§37) and

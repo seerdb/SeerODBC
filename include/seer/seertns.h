@@ -115,6 +115,20 @@ SeerStatus seer_tpc_commit(SeerConn *conn, const SeerXid *xid, int one_phase);
 /* Roll the branch back. */
 SeerStatus seer_tpc_rollback(SeerConn *conn, const SeerXid *xid);
 
+/* Sessionless transactions (§31, 23ai+). A transaction that lives in the database,
+ * not the session: begin it on one connection, suspend it, then resume + commit it
+ * on any connection. `txn_id` (1..64 bytes) names the transaction and is required
+ * — the same id is passed to resume elsewhere. `timeout` is the seconds the server
+ * keeps a suspended transaction resumable (0 = server default). Use autocommit off
+ * so the DML between begin/resume and suspend/commit joins the transaction; end it
+ * with the ordinary seer_commit / seer_rollback. All three return SEER_ENOTIMPL on
+ * a pre-23ai server. Only one sessionless transaction may be active per connection. */
+SeerStatus seer_txn_begin_sessionless(SeerConn *conn, const uint8_t *txn_id,
+                                      size_t txn_id_len, uint32_t timeout);
+SeerStatus seer_txn_resume_sessionless(SeerConn *conn, const uint8_t *txn_id,
+                                       size_t txn_id_len, uint32_t timeout);
+SeerStatus seer_txn_suspend_sessionless(SeerConn *conn);
+
 /* Advanced Queuing: enqueue a RAW message to `queue_name` (current schema unless
  * "SCHEMA.QUEUE"). The queue's payload type must be RAW. On success the 16-byte
  * message id is written to `msgid` (if non-NULL). Enqueue visibility is ON_COMMIT,
