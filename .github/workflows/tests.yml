@@ -194,4 +194,5 @@ jobs:
             'object bind (live)' \
             'advanced queuing (live)' \
             'request boundaries (live)' \
-            'sessionless transactions (live)'
+            'sessionless transactions (live)' \
+            'request pipelining (live)'

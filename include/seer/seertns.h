@@ -436,6 +436,41 @@ const char *seer_strerror(SeerStatus status);
 /* The last server error message (ORA-NNNNN: ...) for a connection, or NULL. */
 const char *seer_last_error(SeerConn *conn);
 
+/* Request pipelining (§32, #132). A pipeline collects several operations that run
+ * in order; on a 23ai server that negotiated end-of-response framing they are
+ * later sent as one round trip, but the API, ordering and results are identical
+ * to running them one at a time. Build one, queue operations, run it, then read
+ * each operation's outcome. */
+typedef struct SeerPipeline SeerPipeline;
+
+SeerPipeline *seer_pipeline_create(void);
+void          seer_pipeline_free(SeerPipeline *p);
+
+/* Queue operations (executed in the order added). A query op (fetchone/many/all)
+ * keeps its executed statement so the caller can read its rows afterwards; an
+ * execute op (DML/DDL/PL-SQL) keeps no rows; commit commits the transaction. */
+SeerStatus seer_pipeline_add_execute(SeerPipeline *p, const char *sql);
+SeerStatus seer_pipeline_add_fetchone(SeerPipeline *p, const char *sql);
+SeerStatus seer_pipeline_add_fetchmany(SeerPipeline *p, const char *sql, uint32_t num_rows);
+SeerStatus seer_pipeline_add_fetchall(SeerPipeline *p, const char *sql);
+SeerStatus seer_pipeline_add_commit(SeerPipeline *p);
+
+/* Run the queued operations. `continue_on_error` non-zero keeps running after an
+ * operation fails (its error is recorded); zero stops after the first failure
+ * (recorded too). Returns SEER_OK once the run completes — per-operation success
+ * is read via seer_pipeline_op_status. SEER_EPARAM on a bad argument. */
+SeerStatus seer_pipeline_run(SeerConn *conn, SeerPipeline *p, int continue_on_error);
+
+/* Results, valid after seer_pipeline_run. */
+size_t seer_pipeline_count(const SeerPipeline *p);
+/* Operation `i`'s outcome: SEER_OK or its failure status; *ora_code (may be NULL)
+ * receives the ORA error number when it failed on the server, else 0. */
+SeerStatus seer_pipeline_op_status(const SeerPipeline *p, size_t i, long *ora_code);
+/* Operation `i`'s executed statement for a query op (holds the result rows — read
+ * with seer_stmt_fetch/get_*), or NULL for execute/commit or a failed op. Borrowed:
+ * owned by the pipeline and freed by seer_pipeline_free. */
+SeerStmt *seer_pipeline_op_stmt(const SeerPipeline *p, size_t i);
+
 #ifdef __cplusplus
 }
 #endif

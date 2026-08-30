@@ -10,6 +10,7 @@ tns_sources = files(
   'marshal.c',
   'oson.c',
   'packet.c',
+  'pipeline.c',
   'reader.c',
   'session.c',
   'stmt.c',
