@@ -305,6 +305,115 @@ SeerStatus seer_ttc_recv(SeerConn *c, uint8_t **out, size_t *outlen)
     return SEER_OK;
 }
 
+/* -------------------------------------------------- request pipelining (§32) */
+
+/* Build the begin-pipeline piggyback (func 199) into `w`: it rides the first
+ * pipelined message, shares op 1's token, and carries the (continue-on-error)
+ * mode. Consumes a sequence number. */
+void seer_ttc_pipeline_begin(SeerConn *c, SeerWriter *w, uint32_t token, uint8_t mode)
+{
+    seer_writer_u8(w, TTI_MSG_TYPE_PIGGYBACK);
+    seer_writer_u8(w, TNS_FUNC_PIPELINE_BEGIN);
+    seer_writer_u8(w, seer_ttc_next_seq(c));
+    if (c->field_version > TTC_FIELD_VERSION_23_1)
+        seer_enc_sb4(w, token);
+    seer_enc_sb4(w, 0);
+    seer_writer_u8(w, 0);
+    seer_writer_u8(w, mode);
+}
+
+/* Build the pipeline-end message (func 200) into `w`, closing the burst. Uses an
+ * ordinary (token 0) function header. Consumes a sequence number. */
+void seer_ttc_pipeline_end(SeerConn *c, SeerWriter *w)
+{
+    uint32_t saved = c->pipeline_token;
+    c->pipeline_token = 0;
+    seer_ttc_fun_header(c, w, TNS_FUNC_PIPELINE_END);
+    c->pipeline_token = saved;
+    seer_enc_sb4(w, 0);
+}
+
+/* Send one pipelined op's request as DATA packet(s) with explicit data flags: an
+ * oversized op fragments at the SDU with the 0x0020 "more" flag; the final
+ * fragment carries `final_flags` (END_OF_REQUEST), and the very first packet of
+ * the whole burst additionally carries `first_flags` (BEGIN_PIPELINE). */
+SeerStatus seer_ttc_send_pipeline_op(SeerConn *c, const uint8_t *data, size_t len,
+                                     uint16_t final_flags, uint16_t first_flags)
+{
+    size_t body_max = (c->sdu > TNS_HEADER_LEN + 2)
+                      ? (size_t)c->sdu - TNS_HEADER_LEN - 2 : len;
+    if (body_max == 0)
+        body_max = len ? len : 1;
+
+    size_t off = 0;
+    bool   first = true;
+    do {
+        size_t remaining = len - off;
+        bool   last      = remaining <= body_max;
+        size_t chunk     = last ? remaining : body_max;
+        uint16_t flags   = (uint16_t)((last ? final_flags : TTC_DATA_FLAG_MORE) |
+                                      (first ? first_flags : 0));
+
+        SeerWriter w;
+        if (!seer_writer_init(&w, chunk + 2))
+            return SEER_ENOMEM;
+        seer_writer_u16(&w, flags);
+        seer_writer_bytes(&w, data + off, chunk);
+        if (!seer_writer_ok(&w)) { seer_writer_free(&w); return SEER_ENOMEM; }
+        SeerStatus st = seer_packet_send(c->t, TNS_PT_DATA, w.buf, w.len);
+        seer_writer_free(&w);
+        if (st != SEER_OK)
+            return st;
+        off  += chunk;
+        first = false;
+    } while (off < len);
+    return SEER_OK;
+}
+
+/* Read exactly one pipelined op's response (TOKEN .. EOR) as one unit. Unlike
+ * seer_ttc_recv, a break marker between op responses is skipped silently (the
+ * server does not wait for a reset during a burst, #158), and the read stops at
+ * the first non-fragment (response-final) packet without coalescing the next
+ * op's response. *out is malloc'd; caller frees. */
+SeerStatus seer_ttc_recv_pipeline(SeerConn *c, uint8_t **out, size_t *outlen)
+{
+    *out = NULL;
+    *outlen = 0;
+    SeerWriter acc;
+    if (!seer_writer_init(&acc, 512))
+        return SEER_ENOMEM;
+
+    for (;;) {
+        uint8_t  type = 0;
+        uint8_t *body = NULL;
+        size_t   blen = 0;
+        SeerStatus st = seer_packet_recv(c->t, &type, &body, &blen);
+        if (st != SEER_OK) { seer_writer_free(&acc); return st; }
+
+        if (type == TNS_PT_MARKER) {   /* per-op error break: skip, no reset */
+            free(body);
+            continue;
+        }
+        if (type != TNS_PT_DATA || blen < 2) {
+            free(body);
+            seer_writer_free(&acc);
+            return SEER_EPROTO;
+        }
+        seer_writer_bytes(&acc, body + 2, blen - 2);   /* drop data flags */
+        size_t total = blen + TNS_HEADER_LEN;
+        free(body);
+
+        bool fragment = c->sdu > 0 &&
+                        (total == (size_t)c->sdu - 37 || total == (size_t)c->sdu - 81);
+        if (!fragment)
+            break;
+    }
+    if (!seer_writer_ok(&acc)) { seer_writer_free(&acc); return SEER_ENOMEM; }
+    *out = acc.buf;
+    *outlen = acc.len;
+    return SEER_OK;
+}
+
 /* Native network encryption negotiation (§33). Runs before PRO, over the
  * plaintext session: send round 1 (offered algorithms), read the server's
  * selection, and — when encryption was selected — complete the Diffie-Hellman
@@ -388,11 +497,12 @@ void seer_ttc_fun_header(SeerConn *c, SeerWriter *w, uint8_t opcode)
     seer_writer_u8(w, TTI_FUN);
     seer_writer_u8(w, opcode);
     seer_writer_u8(w, seer_ttc_next_seq(c));
-    /* fv24 (23ai): oracledb writes an extra pointer byte after the sequence
-     * number on every function message (pyoracle _fun_header, PROTOCOL.md §20).
-     * PRO/DTY/SESS keep their legacy headers - only post-PRO function calls. */
+    /* fv24 (23ai): oracledb writes a ub8 token after the sequence number on every
+     * function message (pyoracle _fun_header, PROTOCOL.md §20). It is 0 for an
+     * ordinary call (encoding to a single 0x00) and 1..N for a pipelined op
+     * (§32/#158), so the server can correlate each burst response. */
     if (c->field_version > TTC_FIELD_VERSION_23_1)
-        seer_writer_u8(w, 0);
+        seer_enc_sb4(w, c->pipeline_token);
 }
 
 /* ------------------------------------------------------------- TTI_PRO/DTY */

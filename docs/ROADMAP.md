@@ -384,20 +384,13 @@ The object/collection arc (incl. the deep tail: collections-of-objects,
 objects-with-collection-attributes, OUT associative arrays), Advanced Queuing,
 XA/2PC, TLS/TCPS, proxy auth + DRCP, native JSON/VECTOR binds, XMLType fetch/bind
 (incl. LOB-backed), statement caching, **Oracle 9i (fv2 / O3LOGON / TTI_ALL7)**,
-**ANO native encryption (§33)**, **request boundaries (§35)** and **sessionless
-transactions (§31)** have all landed — matrix-validated. The driver spans field
-versions 2–24 (9i → 23ai). Reference-backed items still open, from the latest
+**ANO native encryption (§33)**, **request boundaries (§35)**, **sessionless
+transactions (§31)** and **request pipelining (§32, incl. the single-round-trip
+burst)** have all landed — matrix-validated. The driver spans field versions
+2–24 (9i → 23ai). Reference-backed items still open, from the latest
 seerdb/PROTOCOL.md sync:
 
-1. **Request pipelining (§32) — the single-round-trip burst.** The API + result
-   model + serial execution path have landed (core `seer_pipeline_*`: create /
-   add_execute / add_fetchone|many|all / add_commit / run / op_status / op_stmt,
-   with continue-on-error; validated live on 11g/21c/26ai). Still to do: the wire
-   burst (#158) that sends the exec-family ops as one token-tagged round trip on
-   an EOR-negotiated 23ai+ connection (func 199/200 piggybacks, BEGIN_PIPELINE /
-   END_OF_REQUEST data flags, TOKEN-33 correlation, a custom pipelined reader) —
-   a transparent optimisation over the serial path, identical results.
-2. **Token auth — OAuth2 / OCI IAM (§20.6)** and **end-user security context
+1. **Token auth — OAuth2 / OCI IAM (§20.6)** and **end-user security context
    (§34)** — cloud/tcps-gated; validation needs a real IAM token / 26ai TLS path.
 
 Not on the thin wire (documented above, nothing to emit): **sharding** (§37) and

@@ -108,6 +108,28 @@ int main(void)
 
     seer_pipeline_free(pe);
 
+    /* Burst-eligible pipeline (no commit): on an EOR-negotiated 23ai+ server this
+     * runs as one token-tagged round trip; elsewhere it runs serially. Either way
+     * both query ops' rows must come back correctly (token correlation + describe
+     * + rows through the burst). */
+    SeerPipeline *pb = seer_pipeline_create();
+    seer_pipeline_add_fetchall(pb, "SELECT 100 FROM dual");
+    seer_pipeline_add_fetchall(pb, "SELECT 200 FROM dual");
+    seer_pipeline_run(c, pb, 0);
+    long b1 = -1, b2 = -1;
+    SeerStmt *q1 = seer_pipeline_op_stmt(pb, 0);
+    SeerStmt *q2 = seer_pipeline_op_stmt(pb, 1);
+    const char *v = NULL; int isn = 0;
+    if (q1 && seer_stmt_fetch(q1) == SEER_OK && seer_stmt_get_string(q1, 0, &v, &isn) == SEER_OK && v)
+        b1 = atol(v);
+    if (q2 && seer_stmt_fetch(q2) == SEER_OK && seer_stmt_get_string(q2, 0, &v, &isn) == SEER_OK && v)
+        b2 = atol(v);
+    if (b1 == 100 && b2 == 200)
+        pass("two-query pipeline: both ops' rows correct (token-correlated)");
+    else
+        fail("burst queries", "the two query ops did not both yield their rows");
+    seer_pipeline_free(pb);
+
     exec_sql(c, "DROP TABLE seerpipe");
     seer_disconnect(c);
     printf("SUMMARY pipeline pass=%d fail=%d\n", pass_n, fail_n);
