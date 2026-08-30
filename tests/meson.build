@@ -73,6 +73,14 @@ test_sessionless = executable('test_sessionless',
 )
 test('sessionless transactions', test_sessionless)
 
+# Execute-RPA skip regression: a captured 26ai/fv27 response whose RPA field byte
+# 0x04 collided with the OER token and desynced the old skip_rpa heuristic.
+test_rpa_skip = executable('test_rpa_skip',
+  'unit/test_rpa_skip.c',
+  dependencies : [seertns_dep],
+)
+test('rpa skip (fv27)', test_rpa_skip)
+
 # Live two-phase-commit (XA/TPC) test against the core API. Self-gating: exits 77
 # (skip) unless SEER_TEST_HOST/SERVICE/USER are set, so it is a no-op offline.
 test_tpc = executable('test_tpc',

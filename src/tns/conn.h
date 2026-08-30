@@ -67,4 +67,10 @@ void seer_stmt_cache_clear(struct SeerConn *conn);
 SeerStatus seer_tpc_build_switch(struct SeerConn *c, SeerWriter *w, uint32_t op,
                                  const SeerXid *xid, uint32_t flags, uint32_t timeout);
 
+/* Test-only: parse an execute response, reporting column count + OER error code
+ * (defined in stmt.c). Backs the RPA-skip regression test. */
+SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len,
+                                            uint8_t fv, int *out_ncols,
+                                            int64_t *out_err);
+
 #endif /* SEER_TNS_CONN_H */

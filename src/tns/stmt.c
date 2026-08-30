@@ -1016,11 +1016,21 @@ static void skip_capability_block(SeerReader *r)
 
 static SeerStatus skip_rpa(SeerReader *r, SeerStmt *stmt)
 {
+    /* The execute/fetch RPA (return-parameter) block precedes the trailing OER.
+     * On 9i (fv < 10.2) `num` over-counts and the params end early on the real
+     * status token, so we break on a token-valued byte there. From fv4 up `num`
+     * is EXACT and must be consumed in full: a param value's length byte can
+     * itself equal a token id (e.g. a scrollable-cursor position or, on a 26ai/
+     * fv27 server, an execute RPA whose field byte is 0x04) — breaking on that
+     * would stop short and decode the OER off by those bytes. Mirrors seerdb's
+     * decode_token_rpa_piggyback (#181). */
+    bool break_on_token = (stmt == NULL) ||
+                          stmt->conn->field_version < TTC_FIELD_VERSION_10_2;
     int64_t num = seer_dec_sb4(r);
     for (int64_t i = 0; i < num && seer_reader_ok(r); i++) {
         if (seer_reader_remaining(r) == 0)
             break;
-        if (is_known_token(r->buf[r->pos]))
+        if (break_on_token && is_known_token(r->buf[r->pos]))
             break;
         (void)seer_dec_sb4(r);
     }
@@ -5832,6 +5842,31 @@ SeerStatus seer_aq_deq_raw_array(SeerConn *conn, const char *queue_name, int max
 out:
     free_batch_errors(&tmp);
     free(resp);
+    return st;
+}
+
+/* Test-only entry point: run the execute-response token parser over `buf` at
+ * field version `fv`, reporting the column count and the trailing OER error
+ * code. Used by the RPA-skip regression test (a 26ai/fv27 execute response whose
+ * RPA field byte 0x04 collided with the OER token). Not exported from the .so. */
+SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len,
+                                            uint8_t fv, int *out_ncols,
+                                            int64_t *out_err)
+{
+    struct SeerConn conn;
+    memset(&conn, 0, sizeof conn);
+    conn.field_version = fv;
+    SeerStmt *stmt = calloc(1, sizeof *stmt);
+    if (stmt == NULL)
+        return SEER_ENOMEM;
+    stmt->conn = &conn;
+    stmt->cur  = -1;
+    OerResult oer = { 0 };
+    SeerStatus st = parse_response(stmt, buf, len, /*expect_dcb=*/true, &oer);
+    if (out_ncols) *out_ncols = stmt->ncols;
+    if (out_err)   *out_err   = oer.err_code;
+    seer_stmt_close(stmt);
+    free(conn.last_error);   /* the OER message; normally freed by seer_disconnect */
     return st;
 }
 
