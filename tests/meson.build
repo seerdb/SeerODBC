@@ -111,6 +111,13 @@ test_sessionless_live = executable('sessionless_test',
 )
 test('sessionless transactions (live)', test_sessionless_live, is_parallel : false, timeout : 60)
 
+# Live request-pipelining test (§32, core API). Self-gating: exits 77 offline.
+test_pipeline_live = executable('pipeline_test',
+  'odbc/pipeline_test.c',
+  dependencies : [seertns_dep],
+)
+test('request pipelining (live)', test_pipeline_live, is_parallel : false, timeout : 60)
+
 # Live SQL OBJECT bind test (core API). Self-gating: exits 77 (skip) offline.
 test_objbind = executable('test_objbind',
   'odbc/objbind_test.c',
