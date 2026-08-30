@@ -6,6 +6,8 @@
 #include "transport.h"
 
 #include "log.h"
+
+#include <stdbool.h>
 #include "netcompat.h"
 
 #include <stdio.h>
@@ -21,7 +23,19 @@ struct SeerTransport {
     seer_socket_t fd;
     SSL          *ssl;   /* non-NULL once TLS is established */
     SSL_CTX      *ctx;
+    bool          large_frames;   /* 4-byte packet length (§ ver >= 315, #155) */
 };
+
+void seer_transport_set_large_frames(SeerTransport *t, int on)
+{
+    if (t != NULL)
+        t->large_frames = (on != 0);
+}
+
+int seer_transport_large_frames(const SeerTransport *t)
+{
+    return t != NULL && t->large_frames;
+}
 
 /* The most recent OpenSSL error string (for logging), or a fallback. */
 static const char *ssl_err(void)

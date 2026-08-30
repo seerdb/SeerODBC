@@ -38,7 +38,14 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
 - [x] O5LOGON (AES-128/192/256, PBKDF2 for 12c+)
 - [x] 10g legacy DES verifier (OpenSSL legacy provider)
 - [x] 23ai fast-auth (`0x22` bundle, fv24)
-- [x] TNS redirect, large SDU / 4-byte packet framing
+- [x] TNS redirect; large-SDU / 4-byte packet framing (#155) — the CONNECT
+      advertises protocol version 319, and a negotiated version >= 315 (21c/23ai/
+      26ai) switches every packet to the 4-byte ("large") length header; older
+      servers negotiate down (10g→313, 11g→314, 9i→312) and keep legacy framing.
+      The 319 CONNECT carries the large-SDU trailer (32-bit SDU/TDU + connect
+      flags) and the accept's ub4 SDU is read from offset 24. Validated live +
+      ASan across 10g/11g/21c/26ai incl. fragmentation. (Stage 1 of pipelining
+      §32; end-of-response framing #155 + the pipeline burst ride on top.)
 - [x] TLS / TCPS transport — OpenSSL client wraps the socket (SSL=1 or
       PROTOCOL=TCPS); cert verification on by default (TLSCA for a custom CA,
       TLSVERIFY=0 to disable). Validated fv4→fv24 through a terminating proxy
