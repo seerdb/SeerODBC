@@ -56,6 +56,13 @@ typedef struct {
      * purity: 0 default, 1 NEW (fresh session), 2 SELF (reuse). */
     const char *cclass;
     int         purity;
+    /* Sharding keys (§37). A sharding key routes a connection to a specific shard
+     * of a sharded database — an OCI-client capability that the shard resolution
+     * performs below the thin TTC/TNS protocol, so a pure-protocol client has no
+     * message to carry it. Accepted for API parity: seer_connect rejects a
+     * non-empty key with SEER_ENOTIMPL rather than silently ignoring it. */
+    const char *shardingkey;
+    const char *supershardingkey;
 } SeerConnParams;
 
 #define SEER_PURITY_NEW  1
@@ -128,6 +135,15 @@ SeerStatus seer_txn_begin_sessionless(SeerConn *conn, const uint8_t *txn_id,
 SeerStatus seer_txn_resume_sessionless(SeerConn *conn, const uint8_t *txn_id,
                                        size_t txn_id_len, uint32_t timeout);
 SeerStatus seer_txn_suspend_sessionless(SeerConn *conn);
+
+/* Continuous Query Notification (§38). CQN registers a server-initiated
+ * subscription: the database opens a callback connection back to a listener the
+ * client runs and pushes change/query notifications to it. Hosting that callback
+ * channel is an OCI-client capability outside the thin request/response protocol,
+ * so a pure-protocol client cannot offer it. These exist for API parity and
+ * always return SEER_ENOTIMPL (with an explanatory seer_last_error). */
+SeerStatus seer_subscribe(SeerConn *conn);
+SeerStatus seer_unsubscribe(SeerConn *conn);
 
 /* Advanced Queuing: enqueue a RAW message to `queue_name` (current schema unless
  * "SCHEMA.QUEUE"). The queue's payload type must be RAW. On success the 16-byte

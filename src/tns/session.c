@@ -189,6 +189,17 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
         return SEER_EPARAM;
     *out = NULL;
 
+    /* Sharding keys are not on the thin wire (§37): shard routing is an OCI-only
+     * capability below the TTC/TNS protocol, so a non-empty key can't be honoured.
+     * Reject up front (accepted for API parity) rather than connect and mislead. */
+    if ((params->shardingkey && params->shardingkey[0]) ||
+        (params->supershardingkey && params->supershardingkey[0])) {
+        seer_log(SEER_LOG_ERROR,
+                 "sharding keys are not supported in thin mode (§37): shard "
+                 "routing is available only through the OCI-based client");
+        return SEER_ENOTIMPL;
+    }
+
     SeerWriter body;
     SeerStatus st = build_connect_body(params, &body);
     if (st != SEER_OK)
@@ -360,6 +371,39 @@ void seer_disconnect(SeerConn *conn)
 const char *seer_last_error(SeerConn *conn)
 {
     return conn ? conn->last_error : NULL;
+}
+
+/* Continuous Query Notification (§38): not on the thin wire. CQN needs the server
+ * to open a callback connection back to a client-hosted listener, which a
+ * pure-protocol request/response client cannot host. Accepted for API parity and
+ * rejected with a clear message; see seertns.h. */
+static SeerStatus reject_cqn(SeerConn *conn)
+{
+    /* The feature does not exist on the thin wire, so the answer is ENOTIMPL for
+     * any input; record an explanatory message when a connection is available. */
+    if (conn != NULL) {
+        static const char msg[] =
+            "Continuous Query Notification / server-initiated subscriptions are "
+            "not supported in thin mode (§38): the callback channel is available "
+            "only through the OCI-based client";
+        char *copy = malloc(sizeof msg);
+        if (copy != NULL) {
+            memcpy(copy, msg, sizeof msg);
+            free(conn->last_error);
+            conn->last_error = copy;
+        }
+    }
+    return SEER_ENOTIMPL;
+}
+
+SeerStatus seer_subscribe(SeerConn *conn)
+{
+    return reject_cqn(conn);
+}
+
+SeerStatus seer_unsubscribe(SeerConn *conn)
+{
+    return reject_cqn(conn);
 }
 
 void seer_set_autocommit(SeerConn *conn, int on)
