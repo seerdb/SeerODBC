@@ -71,6 +71,16 @@ void       seer_set_autocommit(SeerConn *conn, int on);
 SeerStatus seer_commit(SeerConn *conn);
 SeerStatus seer_rollback(SeerConn *conn);
 
+/* Request boundaries (§35, 21c+). Bracket a logical request on a (typically
+ * pooled) connection so the server can reset session state between requests.
+ * `begin` arms a REQUEST_BEGIN marker that rides in front of the next call with
+ * no extra round-trip; `end` sends REQUEST_END piggybacked on a rollback (or, if
+ * no call ran after `begin`, cancels it and sends nothing). Both return
+ * SEER_ENOTIMPL when the server does not advertise the capability (e.g. 10g/11g),
+ * which callers may treat as "feature inactive" and ignore. */
+SeerStatus seer_request_begin(SeerConn *conn);
+SeerStatus seer_request_end(SeerConn *conn);
+
 /* Two-phase commit / XA (distributed transactions, 12c+). A global transaction
  * is identified by an Xid (format id + global transaction id + branch
  * qualifier). The branch lifecycle is: begin -> [DML] -> end -> prepare ->

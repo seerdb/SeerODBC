@@ -107,6 +107,20 @@
 #define TTI_MSG_TYPE_PIGGYBACK    0x11
 #define TTI_OCCA                  105   /* close cursors */
 
+/* Request boundaries (§35, #464): a func-176 SESSION_STATE piggyback telling the
+ * server a logical request begins/ends so it can reset session state between
+ * requests. The body is a var-int state with the explicit-boundary bit OR'd in.
+ * Gated on compile_caps[40] bit 0x40 AND runtime_caps[6] bit 0x10 (21c+). */
+#define TNS_FUNC_SESSION_STATE              176
+#define TNS_SESSION_STATE_REQUEST_BEGIN     0x04
+#define TNS_SESSION_STATE_REQUEST_END       0x08
+#define TNS_SESSION_STATE_EXPLICIT_BOUNDARY 0x40
+/* The cap slots + bits that gate the feature (server side). */
+#define TNS_CCAP_TTC4                       40
+#define TNS_CCAP_TTC4_EXPLICIT_BOUNDARY     0x40
+#define TNS_RCAP_TTC                        6
+#define TNS_RCAP_TTC_SESSION_STATE_OPS      0x10
+
 /* TTC field versions. 11.2 is the long-standing default; 12.1 is the threshold
  * at which the 12c+ wire forms (UB2 datatype table, extended OER, oaccolid in
  * the describe, al8pidmlrc in the execute) kick in. */

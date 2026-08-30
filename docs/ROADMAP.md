@@ -43,6 +43,13 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
       PROTOCOL=TCPS); cert verification on by default (TLSCA for a custom CA,
       TLSVERIFY=0 to disable). Validated fv4→fv24 through a terminating proxy
       (tests/odbc/tls_proxy.py); the whole TNS/TTC session rides the TLS socket.
+- [x] ANO — native network encryption + data integrity (§33) — the DEADBEEF
+      negotiation after the accept, then AES-CBC + an AES-keystream SHA-2 MAC
+      wrapping every TNS_DATA payload (`src/tns/ano.c`). ANO-capable is advertised
+      (0x0101) and gated on the accept's ACFL flags; a bare-supported server picks
+      the null algorithm and stays plaintext. Validated byte-for-byte against the
+      seerdb reference + a captured 26ai response (test_ano), live plaintext-
+      fallback on 11g, and AES256+SHA256 end-to-end against a required Mirror.
 - [ ] External / OS / Kerberos auth
 - [x] Proxy authentication (`proxy_user[schema]`) — one `PROXY_CLIENT_NAME` auth
       pair names the target schema; the proxy authenticates normally and the
@@ -280,7 +287,29 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
       12c+ (ENOTIMPL below). Validated 21c/23ai: full 2PC commit is durable
       cross-connection, rollback discards. Exposed via the core API (Unix ODBC
       has no standard XA binding), not the SQL* surface.
-- [ ] Sharding
+- [x] Request boundaries (§35) — bracket a logical request so the server can reset
+      session state between requests (a DRCP / pool optimisation). Core `seer_request_begin`
+      / `seer_request_end` emit a one-shot func-176 `SESSION_STATE` piggyback (the
+      state OR'd with the EXPLICIT_BOUNDARY bit): BEGIN rides in front of the next
+      call with no extra round-trip; END rides a rollback round-trip; a BEGIN with
+      no op in between is cancelled and nothing is sent. Gated on the server
+      advertising both compile_caps[40] bit 0x40 AND runtime_caps[6] bit 0x10
+      (21c+); returns ENOTIMPL on 10g/11g. Validated live on 21c; the fv24 wire
+      (an added ub8 token) is pinned byte-for-byte by test_reqbound against the
+      seerdb reference and the §35.3 live-26ai bytes, and exercised on a fresh 23ai
+      in CI. **Decision:** exposed via the core API, not the SQL* surface — ODBC has
+      no request-boundary verb, and connection pooling lives in the driver manager,
+      not the driver; mirrors the XA rationale above. (oracledb ties this to its own
+      pool acquire/release; a bare driver leaves the begin/end to the caller.)
+- [ ] Sharding — **not on the thin wire** (§37). `shardingkey`/`supershardingkey`
+      are an OCI-client capability; a pure-protocol client has no message to carry
+      them (a thin reference client rejects them locally, sending zero bytes). There
+      is nothing to emit; if surfaced, the honest behaviour is a "not supported"
+      error, like the reference thin drivers.
+- [ ] Continuous Query Notification — **not on the thin wire** (§38). CQN needs the
+      server to open a callback connection back to a client-run listener, which a
+      thin request/response client cannot host; the reference thin driver rejects
+      `subscribe()`. Nothing to emit.
 - [ ] Application Continuity
 
 ## Docs & testing
@@ -324,28 +353,38 @@ Default cap is `TTC_FIELD_VERSION_23_4` (24); servers negotiate down via
 
 ### Suggested next pulls (each an isolated, separately-committable feature)
 
-The reference-backed, reachable work has all landed — the object/collection arc
-(incl. the deep tail: collections-of-objects, objects-with-collection-attributes,
-OUT associative arrays), Advanced Queuing, XA/2PC, TLS/TCPS, proxy auth + DRCP,
-native JSON/VECTOR binds, XMLType fetch/bind (incl. LOB-backed), statement caching,
-**and Oracle 9i (fv2 / O3LOGON / TTI_ALL7)** — all matrix-validated. The driver now
-spans field versions 2–24 (9i → 23ai). What genuinely remains is either
-environment-blocked or deep-RE without a reference:
+The object/collection arc (incl. the deep tail: collections-of-objects,
+objects-with-collection-attributes, OUT associative arrays), Advanced Queuing,
+XA/2PC, TLS/TCPS, proxy auth + DRCP, native JSON/VECTOR binds, XMLType fetch/bind
+(incl. LOB-backed), statement caching, **Oracle 9i (fv2 / O3LOGON / TTI_ALL7)**,
+**ANO native encryption (§33)** and **request boundaries (§35)** have all landed —
+matrix-validated. The driver spans field versions 2–24 (9i → 23ai). Reference-backed
+items still open, from the latest seerdb/PROTOCOL.md sync:
 
-1. **12c / 18c / 19c matrix coverage** — the fv7–14 wire forms should already work
-   via down-negotiation; unproven only for lack of a container. Add matrix rows
-   if/when those servers become reachable. (Near-zero code.)
-2. **Server-side scrollable cursors** — fetch is client-buffered today (which is
-   already correct `SQLFetchScroll`); a true server-side scroll cursor would help
-   very large result sets. Attempted 2026-07 and reverted at a wire-framing blocker
-   (the scrollable response desyncs the OER); needs a byte-level capture to finish.
-   Reference: pyoracle `PROTOCOL.md` §5.2.1.
-3. **Continuous Query Notification (CQN)** — register a query for change events. No
-   reference (pyoracle stubs it) **and** needs an async notification-listener; the
-   largest and least-certain remaining item.
-4. **External / OS / Kerberos auth**, **connection failover / TAF**, RAC, sharding,
-   Application Continuity — larger, environment-dependent (need a KDC / RAC cluster
-   to validate).
+1. **Sessionless transactions (§31, 23ai+)** — a transaction that lives in the DB
+   and can be suspended on one session and resumed/committed on another. Reuses the
+   existing TPC machinery (SWITCH 103) with a magic format-id (0x4E5C3E) and the
+   SESSIONLESS flag, plus consuming the server SYNC piggyback (opcode 5). Reference:
+   seerdb `connection.py` `_sessionless_switch` / `PROTOCOL.md` §31.
+2. **Request pipelining (§32, 21c+)** — batch exec/fetch ops into one token-tagged
+   burst read back in a single round trip (func 199/200, end-of-response framing).
+   The heaviest of the open items (new token framing + a custom pipelined reader).
+3. **Token auth — OAuth2 / OCI IAM (§20.6)** and **end-user security context
+   (§34)** — cloud/tcps-gated; validation needs a real IAM token / 26ai TLS path.
+
+Not on the thin wire (documented above, nothing to emit): **sharding** (§37) and
+**CQN** (§38) — both OCI-client capabilities a pure-protocol client cannot carry.
+
+Deep-RE / environment-blocked (no reference):
+
+- **12c / 18c / 19c matrix coverage** — the fv7–14 wire forms should already work
+  via down-negotiation; unproven only for lack of a container. (Near-zero code.)
+- **Server-side scrollable cursors** — fetch is client-buffered today (already a
+  correct `SQLFetchScroll`); a true server-side scroll cursor would help very large
+  result sets. Attempted 2026-07 and reverted at a wire-framing blocker (the
+  scrollable response desyncs the OER); needs a byte-level capture. Ref: §5.2.1.
+- **External / OS / Kerberos auth**, **connection failover / TAF**, RAC,
+  Application Continuity — larger, environment-dependent (need a KDC / RAC cluster).
 
 Deliberately out of scope: TIMESTAMP WITH TIME ZONE binds (the ODBC struct carries
 no zone — would require guessing), AQ recipient-list enqueue (pyoracle only stubs

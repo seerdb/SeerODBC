@@ -192,4 +192,5 @@ jobs:
             'odbc integration' \
             'two-phase commit (live)' \
             'object bind (live)' \
-            'advanced queuing (live)'
+            'advanced queuing (live)' \
+            'request boundaries (live)'

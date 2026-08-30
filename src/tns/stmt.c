@@ -2012,9 +2012,13 @@ static SeerStatus build_exec(SeerStmt *stmt, SeerWriter *w)
     if (stmt->conn->field_version >= TTC_FIELD_VERSION_12_1 && kind == STMT_BLOCK)
         all8[9] |= TNS_AL8I4_IMPLICIT_RESULTSET;
 
+    /* Flush an armed request-boundary marker (§35) as a func-176 piggyback in
+     * front of this execute (REQUEST_BEGIN rides the first op, no round-trip). */
+    SeerConn *c = stmt->conn;
+    seer_ttc_flush_session_state(c, w);
+
     /* Flush any closed statements' server cursors as a CLOSE_CURSORS piggyback in
      * front of this execute, so they don't leak until session end. */
-    SeerConn *c = stmt->conn;
     if (c->n_close > 0) {
         seer_writer_u8(w, TTI_MSG_TYPE_PIGGYBACK);
         seer_writer_u8(w, TTI_OCCA);

@@ -398,9 +398,15 @@ void seer_ttc_fun_header(SeerConn *c, SeerWriter *w, uint8_t opcode)
 /* ------------------------------------------------------------- TTI_PRO/DTY */
 
 /* Walk a TTI_PRO reply and pull out the server's TTC field version
- * (compile_caps[7]). Returns SEER_EPROTO on any bounds violation. */
-static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv)
+ * (compile_caps[7]) and whether it advertises explicit request boundaries (§35:
+ * compile_caps[40] bit 0x40 AND runtime_caps[6] bit 0x10). Returns SEER_EPROTO
+ * on a bounds violation reading the field version; the request-boundary probe is
+ * best-effort and never fails the login (*req_bnd defaults to false). */
+static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv,
+                            bool *req_bnd)
 {
+    if (req_bnd != NULL)
+        *req_bnd = false;
     size_t o = 0;
     if (n < 1 || b[0] != TTI_PRO)
         return SEER_EPROTO;
@@ -429,6 +435,22 @@ static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv)
     if (cclen < 8 || o + cclen > n)
         return SEER_EPROTO;
     *server_fv = b[o + 7];               /* CCAP_FIELD_VERSION */
+
+    /* Request-boundary caps (best-effort): compile_caps[40] bit 0x40, then the
+     * runtime-cap array (rclen + bytes) that follows the compile caps, and its
+     * index 6 bit 0x10. Any shortfall just leaves the feature off. */
+    uint8_t cc40 = (cclen > TNS_CCAP_TTC4) ? b[o + TNS_CCAP_TTC4] : 0;
+    size_t ro = o + cclen;
+    if (ro + 1 <= n) {
+        uint8_t rclen = b[ro];
+        ro += 1;
+        if (ro + rclen <= n) {
+            uint8_t rc6 = (rclen > TNS_RCAP_TTC) ? b[ro + TNS_RCAP_TTC] : 0;
+            if (req_bnd != NULL)
+                *req_bnd = (cc40 & TNS_CCAP_TTC4_EXPLICIT_BOUNDARY) &&
+                           (rc6 & TNS_RCAP_TTC_SESSION_STATE_OPS);
+        }
+    }
     return SEER_OK;
 }
 
@@ -796,12 +818,14 @@ SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
     if (st != SEER_OK)
         return st;
     uint8_t server_fv = 0;
-    st = parse_pro(resp, rlen, &server_fv);
+    bool    req_bnd = false;
+    st = parse_pro(resp, rlen, &server_fv, &req_bnd);
     free(resp);
     if (st != SEER_OK) {
         seer_log(SEER_LOG_ERROR, "ttc: could not parse PRO reply");
         return st;
     }
+    conn->req_boundaries = req_bnd;   /* §35: explicit request-boundary support */
     /* Advertise up to TTC_FIELD_VERSION_MAX (the biggest version whose data path
      * is complete); SEER_MAX_FV overrides it. The server negotiates down: we use
      * min(server_fv, our_max), so 9i/10g/11g stay on the legacy fv path
@@ -1247,16 +1271,55 @@ SeerStatus seer_ttc_authenticate(SeerConn *conn, const SeerConnParams *params,
     return SEER_OK;
 }
 
-/* Commit or rollback: a bare TTI_FUN call (§8). The response (STA/OER) is read
- * to keep the stream in sync; commit errors are rare and surface on the next
- * operation. */
+/* Request-boundary (§35) piggyback helpers, used by the execute builder and the
+ * commit/rollback path to ride an armed marker in front of the next call. */
+void seer_ttc_session_state_piggyback(SeerWriter *w, uint8_t seq,
+                                      uint8_t field_version, uint8_t state)
+{
+    seer_writer_u8(w, TTI_MSG_TYPE_PIGGYBACK);
+    seer_writer_u8(w, TNS_FUNC_SESSION_STATE);
+    seer_writer_u8(w, seq);
+    if (field_version > TTC_FIELD_VERSION_23_1)
+        seer_enc_sb4(w, 0);              /* ub8 token (fv24) */
+    seer_enc_sb4(w, (uint32_t)(state | TNS_SESSION_STATE_EXPLICIT_BOUNDARY));
+}
+
+void seer_ttc_flush_session_state(SeerConn *c, SeerWriter *w)
+{
+    if (c->session_state == 0)
+        return;
+    seer_ttc_session_state_piggyback(w, seer_ttc_next_seq(c), c->field_version,
+                                     c->session_state);
+    c->session_state = 0;                /* one-shot */
+}
+
+/* Commit or rollback: a bare TTI_FUN call (§8), with any armed request-boundary
+ * marker (§35) prepended. The response (STA/OER) is read to keep the stream in
+ * sync; commit errors are rare and surface on the next operation. */
 static SeerStatus seer_ttc_tran(SeerConn *conn, uint8_t func)
 {
     if (conn == NULL || conn->t == NULL || !conn->authenticated)
         return SEER_EPARAM;
-    uint8_t msg[4] = { TTI_FUN, func, seer_ttc_next_seq(conn), 0 };
-    size_t  msglen = (conn->field_version > TTC_FIELD_VERSION_23_1) ? 4 : 3;
-    SeerStatus st = seer_ttc_send(conn, msg, msglen);
+    SeerStatus st;
+    if (conn->session_state != 0) {
+        /* A request-boundary marker (§35) rides in front of this call. */
+        SeerWriter w;
+        if (!seer_writer_init(&w, 16))
+            return SEER_ENOMEM;
+        seer_ttc_flush_session_state(conn, &w);
+        seer_writer_u8(&w, TTI_FUN);
+        seer_writer_u8(&w, func);
+        seer_writer_u8(&w, seer_ttc_next_seq(conn));
+        if (conn->field_version > TTC_FIELD_VERSION_23_1)
+            seer_writer_u8(&w, 0);
+        if (!seer_writer_ok(&w)) { seer_writer_free(&w); return SEER_ENOMEM; }
+        st = seer_ttc_send(conn, w.buf, w.len);
+        seer_writer_free(&w);
+    } else {
+        uint8_t msg[4] = { TTI_FUN, func, seer_ttc_next_seq(conn), 0 };
+        size_t  msglen = (conn->field_version > TTC_FIELD_VERSION_23_1) ? 4 : 3;
+        st = seer_ttc_send(conn, msg, msglen);
+    }
     if (st != SEER_OK)
         return st;
     uint8_t *resp = NULL;
@@ -1266,6 +1329,41 @@ static SeerStatus seer_ttc_tran(SeerConn *conn, uint8_t func)
         return st;
     free(resp);
     return SEER_OK;
+}
+
+SeerStatus seer_request_begin(SeerConn *conn)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (!conn->req_boundaries)
+        return SEER_ENOTIMPL;            /* 10g/11g: server does not advertise it */
+    if (conn->in_request)
+        return SEER_EPARAM;              /* a request is already open */
+    /* Arm REQUEST_BEGIN; it rides in front of the next call (no round-trip). */
+    conn->session_state = TNS_SESSION_STATE_REQUEST_BEGIN;
+    conn->in_request    = true;
+    return SEER_OK;
+}
+
+SeerStatus seer_request_end(SeerConn *conn)
+{
+    if (conn == NULL)
+        return SEER_EPARAM;
+    if (!conn->req_boundaries)
+        return SEER_ENOTIMPL;
+    if (!conn->in_request)
+        return SEER_OK;                  /* nothing open */
+    if (conn->session_state != 0) {
+        /* BEGIN was armed but never rode a call (no operation ran): nothing was
+         * sent, so cancel it and send nothing. */
+        conn->session_state = 0;
+        conn->in_request    = false;
+        return SEER_OK;
+    }
+    /* Send REQUEST_END piggybacked on a rollback round-trip. */
+    conn->session_state = TNS_SESSION_STATE_REQUEST_END;
+    conn->in_request    = false;
+    return seer_rollback(conn);
 }
 
 SeerStatus seer_commit(SeerConn *conn)
