@@ -25,6 +25,12 @@ struct SeerConn {
     uint8_t        field_version;  /* negotiated TTC field version (from PRO) */
     bool           authenticated;  /* O5LOGON completed                      */
     bool           autocommit;     /* commit each statement (default true)    */
+    /* Request boundaries (§35): server support (from PRO caps), the one-shot
+     * armed marker (0 / REQUEST_BEGIN / REQUEST_END) flushed as a func-176
+     * piggyback in front of the next call, and whether a logical request is open. */
+    bool           req_boundaries;
+    uint8_t        session_state;
+    bool           in_request;
     uint32_t       server_release; /* packed AUTH_VERSION_NO                  */
     char          *last_error;     /* last ORA-NNNNN message (malloc'd)       */
     volatile bool  in_call;        /* blocked in seer_ttc_recv (cancel window) */

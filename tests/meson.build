@@ -59,6 +59,13 @@ test_ano = executable('test_ano',
 )
 test('ano native encryption', test_ano)
 
+# Request-boundary (session-state) piggyback known-answer test (§35).
+test_reqbound = executable('test_reqbound',
+  'unit/test_reqbound.c',
+  dependencies : [seertns_dep],
+)
+test('request boundaries', test_reqbound)
+
 # Live two-phase-commit (XA/TPC) test against the core API. Self-gating: exits 77
 # (skip) unless SEER_TEST_HOST/SERVICE/USER are set, so it is a no-op offline.
 test_tpc = executable('test_tpc',
@@ -66,6 +73,13 @@ test_tpc = executable('test_tpc',
   dependencies : [seertns_dep],
 )
 test('two-phase commit (live)', test_tpc, is_parallel : false, timeout : 60)
+
+# Live request-boundary test (§35, core API). Self-gating: exits 77 offline.
+test_reqbound_live = executable('reqbound_test',
+  'odbc/reqbound_test.c',
+  dependencies : [seertns_dep],
+)
+test('request boundaries (live)', test_reqbound_live, is_parallel : false, timeout : 60)
 
 # Live SQL OBJECT bind test (core API). Self-gating: exits 77 (skip) offline.
 test_objbind = executable('test_objbind',

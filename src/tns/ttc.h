@@ -62,6 +62,16 @@ SeerStatus seer_ttc_ano_negotiate(SeerConn *conn);
 /* Next per-connection TTC sequence number (1..127, wrapping). */
 uint8_t seer_ttc_next_seq(SeerConn *conn);
 
+/* Encode a request-boundary (session-state) piggyback (§35) into `w`: func-176,
+ * `seq`, an optional ub8 token (fv > 23.1), then the var-int state with the
+ * explicit-boundary bit OR'd in. Pure/testable. */
+void seer_ttc_session_state_piggyback(SeerWriter *w, uint8_t seq,
+                                      uint8_t field_version, uint8_t state);
+
+/* If a request-boundary marker is armed on `conn`, prepend its piggyback into
+ * `w` (consuming a sequence number) and clear it (one-shot). No-op otherwise. */
+void seer_ttc_flush_session_state(SeerConn *conn, SeerWriter *w);
+
 /* Write a TTC function-message header (TTI_FUN, opcode, seq) into `w`,
  * consuming a fresh sequence number. At fv24 (field_version > 23.1) Oracle
  * writes an extra 0x00 pointer byte after the sequence number on every function
