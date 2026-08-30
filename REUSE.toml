@@ -24,3 +24,12 @@ path = [
 precedence = "aggregate"
 SPDX-FileCopyrightText = "© 2026 Peter Lemenkov and the SeerODBC contributors"
 SPDX-License-Identifier = "CC0-1.0"
+
+# A captured ANO negotiation response (raw protocol bytes from a 26ai server),
+# used as a known-answer fixture by the native-encryption test. A binary blob
+# can't carry an inline SPDX comment, so its licensing is declared here.
+[[annotations]]
+path = "tests/fixtures/ano_server_response.bin"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© 2026 Peter Lemenkov and the SeerODBC contributors"
+SPDX-License-Identifier = "Apache-2.0"

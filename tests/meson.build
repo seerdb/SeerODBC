@@ -50,6 +50,15 @@ test_json = executable('test_json',
 )
 test('json->oson encoder', test_json)
 
+# ANO native-encryption known-answer test (round-1/2 codec, DH, AES-CBC + SHA-256
+# MAC), pinned to the seerdb reference vectors + a captured 26ai server response.
+test_ano = executable('test_ano',
+  'unit/test_ano.c',
+  c_args : ['-DSEER_ANO_FIXTURE="' + meson.current_source_dir() + '/fixtures/ano_server_response.bin"'],
+  dependencies : [seertns_dep],
+)
+test('ano native encryption', test_ano)
+
 # Live two-phase-commit (XA/TPC) test against the core API. Self-gating: exits 77
 # (skip) unless SEER_TEST_HOST/SERVICE/USER are set, so it is a no-op offline.
 test_tpc = executable('test_tpc',

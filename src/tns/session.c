@@ -13,6 +13,7 @@
  */
 #include "seer/seertns.h"
 
+#include "ano.h"
 #include "conn.h"
 #include "log.h"
 #include "netcompat.h"   /* gethostname(): <unistd.h> on POSIX, Winsock on Windows */
@@ -39,7 +40,10 @@
 #define TNS_PROTO_CHARS       0x4F98
 #define TNS_HW_BYTE_ORDER     0x0001   /* big-endian */
 #define TNS_CONNECT_DATA_OFF  0x003A   /* 58 = 8-byte TNS header + 50-byte body */
-#define TNS_ANO_FLAGS         0x8484   /* ANO (Native Network Encryption) disabled */
+/* ANO-capable (§33.1). The legacy 0x8484 ("disabled") makes an ANO server RESET
+ * after negotiation round 1; advertising 0x0101 commits us to running the ANO
+ * negotiation (gated on the accept's ACFL flags) before PRO. */
+#define TNS_ANO_FLAGS         0x0101
 #define TNS_CONNECT_HDR_RSVD  24       /* zero padding to reach the 50-byte body */
 
 #define MAX_REDIRECTS 5
@@ -204,6 +208,7 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
 
     int redirects = 0;
     int resends   = 0;
+    bool ano_gate = false;   /* the accept advertised ANO; negotiate before PRO */
 
     for (;;) {
         if (conn->t == NULL) {
@@ -237,6 +242,13 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
             conn->version = seer_reader_u16(&r);  /* body off 0 */
             (void)seer_reader_u16(&r);            /* body off 2: service options */
             conn->sdu = seer_reader_u16(&r);      /* body off 4 */
+            /* ANO gate (§33.1): once we advertised ANO-capable, negotiate iff
+             * the accept's ACFL0 (off 14) bit0 is set, bit2 clear, and ACFL1
+             * (off 15) bit3 clear. A server that only supports ANO answers with
+             * the null algorithm and the session stays plaintext. */
+            uint8_t acfl0 = (rlen > 14) ? rbody[14] : 0;
+            uint8_t acfl1 = (rlen > 15) ? rbody[15] : 0;
+            ano_gate = (acfl0 & 0x01) && !(acfl0 & 0x04) && !(acfl1 & 0x08);
             free(rbody);
 
             seer_log(SEER_LOG_INFO, "TNS: ACCEPT from %s:%u (version=%u, sdu=%u)",
@@ -294,6 +306,17 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
     /* TNS session is up. The connect body is no longer needed. */
     seer_writer_free(&body);
 
+    /* Native network encryption (§33): run the ANO negotiation before PRO. It
+     * is plaintext and only activates the per-packet cipher + MAC if the server
+     * actually selects an algorithm; a bare-supported server stays plaintext. */
+    if (ano_gate) {
+        st = seer_ttc_ano_negotiate(conn);
+        if (st != SEER_OK) {
+            seer_disconnect(conn);
+            return st;
+        }
+    }
+
     /* TTC negotiation (PRO/DTY) + session setup, ending at the auth challenge. */
     SeerAuthChallenge challenge;
     st = seer_ttc_login(conn, params, &challenge);
@@ -325,6 +348,7 @@ void seer_disconnect(SeerConn *conn)
         return;
     seer_ttc_logoff(conn);   /* best-effort TTI_LOGOFF + EOF on a live session */
     seer_transport_close(conn->t);
+    seer_ano_free(conn->ano);
     seer_stmt_cache_clear(conn);
     free(conn->last_error);
     free(conn->tpc_context);
