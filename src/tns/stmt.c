@@ -140,6 +140,8 @@ struct SeerStmt {
     int         npbinds;
     int         n_iters;     /* array-bind iteration count (default 1) */
     int         cur_iter;    /* iteration the bind functions target */
+    uint32_t    prefetch;    /* execute prefetch row count (0 = PREFETCH_ROWS);
+                              * a pipelined op sets it high to pull rows inline */
     SeerColumn *cols;
     int         ncols;
     SeerCell  **rows;        /* rows[r] is a SeerCell array of ncols */
@@ -1428,6 +1430,12 @@ static SeerStatus parse_response(SeerStmt *stmt, const uint8_t *buf, size_t len,
              * a terminal too so an EOR-only response ends cleanly. */
             got_oer = true;
             break;
+        case TTI_TOKEN:
+            /* Pipelining (§32/#158): a response-correlation marker leading a
+             * pipelined op's response — a ub8 token number. Consume it and keep
+             * decoding the op body (which ends on its own OER/EOR). */
+            (void)seer_dec_sb4(&r);
+            break;
         default:
             seer_log(SEER_LOG_ERROR, "stmt: unexpected response token %u", tok);
             st = SEER_EPROTO;
@@ -2080,7 +2088,7 @@ static SeerStatus build_exec(SeerStmt *stmt, SeerWriter *w)
     seer_writer_u8(w, 0);
     seer_writer_u8(w, 0);
     seer_enc_sb4(w, lmax);                 /* long max value               */
-    seer_enc_sb4(w, PREFETCH_ROWS);        /* prefetch row count           */
+    seer_enc_sb4(w, stmt->prefetch ? stmt->prefetch : PREFETCH_ROWS); /* prefetch */
     seer_enc_sb4(w, 0x7FFFFFFF);           /* max value                    */
     seer_writer_u8(w, nb > 0 ? 1 : 0);     /* bind present                 */
     seer_enc_sb4(w, (uint32_t)nb);         /* bind count                   */
@@ -3777,6 +3785,124 @@ retry_exec:
              stmt->ncols, stmt->nrows,
              stmt->nplobs ? ", LOBs resolved" : "");
     return SEER_OK;
+}
+
+/* Pipelining (§32/#158): set a fetch op's prefetch so its rows arrive inline in
+ * the burst response (the burst can't interleave follow-up TTI_FETCH calls). */
+void seer_stmt_set_prefetch(SeerStmt *stmt, uint32_t rows)
+{
+    if (stmt != NULL)
+        stmt->prefetch = rows;
+}
+
+/* Run an eligible pipeline as one token-tagged round trip (§32/#158). Each stmt
+ * is freshly prepared + configured by the caller. Build every op's execute (token
+ * 1..n), send the burst (begin piggyback + ops + end message), then read and
+ * parse the n token-tagged responses back-to-back into the stmts, plus the
+ * end-pipeline terminating response (discarded). ora_codes[i] gets op i's server
+ * error (0 = success; -1 = a response that failed to decode). Returns SEER_OK
+ * once the wire burst completes; a wire-level send/recv failure aborts it (the
+ * connection may then be unusable). */
+SeerStatus seer_stmt_pipeline_burst(SeerConn *c, SeerStmt **stmts, size_t n,
+                                    long *ora_codes)
+{
+    if (c == NULL || stmts == NULL || ora_codes == NULL || n == 0)
+        return SEER_EPARAM;
+
+    SeerWriter *msgs = calloc(n, sizeof *msgs);
+    if (msgs == NULL)
+        return SEER_ENOMEM;
+    size_t built = 0;
+    SeerStatus st = SEER_OK;
+
+    /* Phase 1: the begin piggyback + each op's execute (token 1..n, fresh parse). */
+    SeerWriter begin;
+    if (!seer_writer_init(&begin, 16)) { free(msgs); return SEER_ENOMEM; }
+    seer_ttc_pipeline_begin(c, &begin, 1, TNS_PIPELINE_MODE_CONTINUE);
+
+    for (size_t i = 0; i < n; i++) {
+        stmts[i]->reuse_cursor = 0;               /* pipelined ops never cache-reuse */
+        c->pipeline_token = (uint32_t)(i + 1);
+        st = build_exec(stmts[i], &msgs[i]);
+        c->pipeline_token = 0;
+        if (st != SEER_OK)
+            goto cleanup;
+        built = i + 1;
+    }
+
+    SeerWriter end;
+    if (!seer_writer_init(&end, 16)) { st = SEER_ENOMEM; goto cleanup; }
+    seer_ttc_pipeline_end(c, &end);
+
+    /* Phase 2: send. First packet = begin ++ op 1 (BEGIN_PIPELINE|END_OF_REQUEST);
+     * ops 2..n each END_OF_REQUEST; then the ordinary end-pipeline message. */
+    SeerWriter first;
+    if (!seer_writer_init(&first, begin.len + msgs[0].len)) {
+        seer_writer_free(&end); st = SEER_ENOMEM; goto cleanup;
+    }
+    seer_writer_bytes(&first, begin.buf, begin.len);
+    seer_writer_bytes(&first, msgs[0].buf, msgs[0].len);
+    st = seer_writer_ok(&first)
+       ? seer_ttc_send_pipeline_op(c, first.buf, first.len,
+                                   TNS_DATA_FLAGS_END_OF_REQUEST,
+                                   TNS_DATA_FLAGS_BEGIN_PIPELINE)
+       : SEER_ENOMEM;
+    seer_writer_free(&first);
+    for (size_t i = 1; i < n && st == SEER_OK; i++)
+        st = seer_ttc_send_pipeline_op(c, msgs[i].buf, msgs[i].len,
+                                       TNS_DATA_FLAGS_END_OF_REQUEST, 0);
+    if (st == SEER_OK)
+        st = seer_ttc_send(c, end.buf, end.len);   /* ordinary send (data flags 0) */
+    seer_writer_free(&end);
+    if (st != SEER_OK)
+        goto cleanup;
+
+    /* Phase 3: read + parse each op's response (no resolve calls yet — the line
+     * still holds the queued responses). A decode failure is per-op; keep reading
+     * so the stream stays in sync. A wire recv failure aborts the whole burst. */
+    for (size_t i = 0; i < n; i++) {
+        uint8_t *resp = NULL;
+        size_t   rlen = 0;
+        st = seer_ttc_recv_pipeline(c, &resp, &rlen);
+        if (st != SEER_OK)
+            goto cleanup;
+        OerResult  oer = { 0 };
+        SeerStatus pst = parse_response(stmts[i], resp, rlen, /*expect_dcb=*/true, &oer);
+        free(resp);
+        if (pst != SEER_OK) {
+            ora_codes[i] = -1;
+            continue;
+        }
+        stmts[i]->cursor_id = (int)oer.cursor_id;
+        stmts[i]->affected  = (long)oer.row_count;
+        stmts[i]->executed  = true;
+        stmts[i]->cur       = -1;
+        ora_codes[i] = (oer.err_code == 1403) ? 0 : (long)oer.err_code;
+    }
+    /* The end-pipeline message draws its own terminating response after the n op
+     * responses; read and discard it so the next call is not left reading it. */
+    {
+        uint8_t *er = NULL;
+        size_t   el = 0;
+        if (seer_ttc_recv_pipeline(c, &er, &el) == SEER_OK)
+            free(er);
+    }
+
+    /* Phase 4: the line is clean now — resolve any LOB/object cells (these issue
+     * their own calls) for every successful op. */
+    for (size_t i = 0; i < n; i++) {
+        if (ora_codes[i] == 0) {
+            resolve_pending_lobs(stmts[i]);
+            resolve_pending_objs(stmts[i]);
+        }
+    }
+
+cleanup:
+    seer_writer_free(&begin);
+    for (size_t i = 0; i < built; i++)
+        seer_writer_free(&msgs[i]);
+    free(msgs);
+    return st;
 }
 
 SeerStatus seer_stmt_next_result(SeerStmt *stmt)

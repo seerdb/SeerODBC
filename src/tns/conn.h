@@ -36,6 +36,9 @@ struct SeerConn {
      * so we opt in via the DTY cap and the server terminates every response with
      * a TTI_END_OF_RESPONSE (29) token. Prerequisite for request pipelining. */
     bool           supports_eor;
+    /* Pipelining (§32/#158): the token written into the fun-header (0 = ordinary
+     * call; 1..N tags a pipelined op so the server can correlate its response). */
+    uint32_t       pipeline_token;
     /* Sessionless transactions (§31): a sessionless txn is currently begun/resumed
      * on this connection (client-side tracking, like seerdb). */
     bool           sessionless_active;
@@ -76,5 +79,13 @@ SeerStatus seer_tpc_build_switch(struct SeerConn *c, SeerWriter *w, uint32_t op,
 SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len,
                                             uint8_t fv, int *out_ncols,
                                             int64_t *out_err);
+
+/* Pipelining (§32/#158, defined in stmt.c). seer_stmt_set_prefetch tunes a fetch
+ * op's inline prefetch; seer_stmt_pipeline_burst runs n freshly-prepared ops as
+ * one token-tagged round trip, filling the stmts + per-op ora_codes. Used by the
+ * pipeline layer (pipeline.c). */
+void       seer_stmt_set_prefetch(SeerStmt *stmt, uint32_t rows);
+SeerStatus seer_stmt_pipeline_burst(struct SeerConn *conn, SeerStmt **stmts,
+                                    size_t n, long *ora_codes);
 
 #endif /* SEER_TNS_CONN_H */

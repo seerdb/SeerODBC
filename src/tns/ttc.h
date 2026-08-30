@@ -54,6 +54,13 @@ SeerStatus seer_ttc_send(SeerConn *conn, const uint8_t *msg, size_t len);
 /* Receive a complete TTC message (reassembling fragments). *out is malloc'd. */
 SeerStatus seer_ttc_recv(SeerConn *conn, uint8_t **out, size_t *outlen);
 
+/* Request pipelining (§32/#158) burst primitives. */
+void seer_ttc_pipeline_begin(SeerConn *conn, SeerWriter *w, uint32_t token, uint8_t mode);
+void seer_ttc_pipeline_end(SeerConn *conn, SeerWriter *w);
+SeerStatus seer_ttc_send_pipeline_op(SeerConn *conn, const uint8_t *data, size_t len,
+                                     uint16_t final_flags, uint16_t first_flags);
+SeerStatus seer_ttc_recv_pipeline(SeerConn *conn, uint8_t **out, size_t *outlen);
+
 /* Run the ANO native-encryption negotiation (§33) over the accepted TNS
  * session, before PRO. On success the connection's cipher is activated when the
  * server selects an algorithm, else the session stays plaintext. */

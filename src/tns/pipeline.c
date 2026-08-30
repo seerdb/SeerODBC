@@ -13,6 +13,8 @@
  */
 #include "seer/seertns.h"
 
+#include "conn.h"   /* struct SeerConn (EOR/ANO gate) + the burst entry points */
+
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -157,6 +159,66 @@ static void run_op(SeerConn *conn, PipeOp *op)
         seer_stmt_close(s);
 }
 
+/* The single-round-trip wire burst (#158) covers the exec-family ops only, and
+ * needs an EOR-negotiated connection with no ANO cipher active (the burst framing
+ * bypasses the per-packet wrap). A commit / unsupported op, or any other server,
+ * falls back to the serial loop — identical API, ordering and results. */
+static int pipeline_wire_eligible(SeerConn *conn, SeerPipeline *p)
+{
+    if (!conn->supports_eor || conn->ano != NULL || p->n == 0)
+        return 0;
+    for (size_t i = 0; i < p->n; i++)
+        if (p->ops[i].type == PIPE_COMMIT)
+            return 0;
+    return 1;
+}
+
+/* Run the whole pipeline as one token-tagged round trip. Prepares a fresh stmt
+ * per op (fetch ops get a large inline prefetch), runs the burst, and distributes
+ * the per-op outcomes into the result model (identical to the serial path). */
+static SeerStatus run_burst(SeerConn *conn, SeerPipeline *p)
+{
+    SeerStmt **stmts = calloc(p->n, sizeof *stmts);
+    long      *codes = calloc(p->n, sizeof *codes);
+    if (stmts == NULL || codes == NULL) { free(stmts); free(codes); return SEER_ENOMEM; }
+
+    SeerStatus st = SEER_OK;
+    for (size_t i = 0; i < p->n; i++) {
+        st = seer_stmt_prepare(conn, p->ops[i].sql, &stmts[i]);
+        if (st != SEER_OK)
+            break;
+        uint32_t pf = 0;
+        if (p->ops[i].type == PIPE_FETCHONE)  pf = 1;
+        else if (p->ops[i].type == PIPE_FETCHMANY) pf = p->ops[i].num_rows ? p->ops[i].num_rows : 100;
+        else if (p->ops[i].type == PIPE_FETCHALL)  pf = 32760;
+        if (pf != 0)
+            seer_stmt_set_prefetch(stmts[i], pf);
+    }
+    if (st == SEER_OK)
+        st = seer_stmt_pipeline_burst(conn, stmts, p->n, codes);
+    if (st != SEER_OK) {
+        for (size_t i = 0; i < p->n; i++)
+            seer_stmt_close(stmts[i]);
+        free(stmts);
+        free(codes);
+        return st;
+    }
+
+    for (size_t i = 0; i < p->n; i++) {
+        long code = codes[i];
+        p->ops[i].ora_code = code > 0 ? code : 0;
+        p->ops[i].status   = code == 0 ? SEER_OK
+                           : (code == -1 ? SEER_EPROTO : SEER_EDB);
+        if (pipe_is_query(p->ops[i].type) && code == 0)
+            p->ops[i].stmt = stmts[i];       /* keep for row access */
+        else
+            seer_stmt_close(stmts[i]);       /* execute op, or a failed op */
+    }
+    free(stmts);
+    free(codes);
+    return SEER_OK;
+}
+
 SeerStatus seer_pipeline_run(SeerConn *conn, SeerPipeline *p, int continue_on_error)
 {
     if (conn == NULL || p == NULL)
@@ -166,6 +228,21 @@ SeerStatus seer_pipeline_run(SeerConn *conn, SeerPipeline *p, int continue_on_er
     for (size_t i = 0; i < p->n; i++) {
         seer_stmt_close(p->ops[i].stmt);
         p->ops[i].stmt = NULL;
+    }
+
+    /* Fast path: one token-tagged round trip for an eligible pipeline. The wire
+     * always runs continue-on-error (all ops execute), so the caller's
+     * continue_on_error only shapes the serial fallback's early stop. */
+    if (pipeline_wire_eligible(conn, p)) {
+        SeerStatus st = run_burst(conn, p);
+        if (st == SEER_OK) {
+            p->ran = 1;
+            return SEER_OK;
+        }
+        /* A build-time failure before any bytes went out is safe to retry
+         * serially; a mid-wire failure returns the error. */
+        if (st != SEER_ENOMEM)
+            return st;
     }
 
     for (size_t i = 0; i < p->n; i++) {

@@ -23,6 +23,18 @@
 #define TTI_SVR_PIGGYBACK 23 /* server-side session-state piggyback (DRCP) */
 #define TTI_IRD  27   /* implicit result set descriptor (12c+) */
 #define TTI_END_OF_RESPONSE 29 /* per-response terminator (EOR framing, #155) */
+#define TTI_TOKEN           33 /* response-correlation marker (pipelining, #132) */
+
+/* Request pipelining wire burst (§32/#158). A begin-pipeline piggyback (func
+ * 199) rides the first message with data flag BEGIN_PIPELINE; each op message
+ * carries END_OF_REQUEST; a pipeline-end message (func 200) closes the burst.
+ * The server tags each op's response with a TTI_TOKEN (33) + ub8 token and ends
+ * it with TTI_END_OF_RESPONSE (29). The wire always runs continue-on-error. */
+#define TNS_FUNC_PIPELINE_BEGIN       199
+#define TNS_FUNC_PIPELINE_END         200
+#define TNS_DATA_FLAGS_BEGIN_PIPELINE 0x1000
+#define TNS_DATA_FLAGS_END_OF_REQUEST 0x0800
+#define TNS_PIPELINE_MODE_CONTINUE    1
 
 /* Server-side piggyback opcodes (DRCP, #130). */
 #define TNS_SVR_PIG_OS_PID_MTS  2
