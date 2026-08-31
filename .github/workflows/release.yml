@@ -1,0 +1,82 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
+# SPDX-License-Identifier: CC0-1.0
+
+name: Release
+
+on:
+  push:
+    tags:
+      # Unprefixed x.y.z only. AGENTS.md ("Tag naming") requires bare tags
+      # because the Fedora spec's Source: URL is built from a bare %{version};
+      # a v-prefixed tag would ship a broken tarball URL, so we deliberately do
+      # NOT match it here.
+      - '[0-9]+.[0-9]+.[0-9]+'
+
+permissions:
+  contents: read
+
+jobs:
+  release:
+    name: Build and create the GitHub Release
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write   # required by `gh release create`
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Full history so the auto-generated notes can reach the previous
+          # tag for the "Full Changelog" diff link.
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            meson ninja-build pkg-config libssl-dev unixodbc-dev
+
+      - name: Configure
+        run: meson setup build
+
+      - name: Verify the tag matches the meson project version
+        # Enforces the version sync AGENTS.md requires: a release tag must equal
+        # the version bumped in meson.build (which is kept in lockstep with
+        # include/seer/seertns.h and packaging/seerodbc.spec). Catches a tag
+        # pushed without the version bump — or vice versa.
+        run: |
+          ver=$(meson introspect build --projectinfo | jq -r .version)
+          if [ "$ver" != "${GITHUB_REF_NAME}" ]; then
+            echo "::error::tag ${GITHUB_REF_NAME} != meson project version ${ver}" \
+                 "(see AGENTS.md: the three version locations must stay in sync)"
+            exit 1
+          fi
+
+      - name: Compile
+        run: meson compile -C build
+
+      - name: Offline unit tests
+        # Gate the release on the offline-safe suite. The live meson tests
+        # self-gate (exit 77 = skip) without SEER_TEST_*, so this exercises only
+        # the protocol-core + ODBC-shim unit tests — no Oracle needed. The live
+        # matrix is the maintainer's pre-tag step (tests/odbc/run-matrix.sh).
+        run: meson test -C build --print-errorlogs
+
+      - name: Build the source distribution
+        # `meson dist` produces a reproducible git-archived source tarball and
+        # re-builds + re-tests it in isolation — a build-from-tarball smoke test
+        # of exactly what downstream packagers consume. Output lands in
+        # build/meson-dist/ (a .tar.xz plus its .sha256sum).
+        run: meson dist -C build
+
+      - name: Create GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # `--generate-notes` produces GitHub's standard auto-generated summary:
+          # "What's Changed" (PRs since the previous tag), "New Contributors" and
+          # a "Full Changelog" link — the same as the "Generate release notes"
+          # button in the UI. `--verify-tag` refuses to release a nonexistent tag.
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "SeerODBC ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            --verify-tag \
+            build/meson-dist/*

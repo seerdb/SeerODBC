@@ -18,7 +18,7 @@ extern "C" {
 #endif
 
 #define SEERTNS_VERSION_MAJOR 0
-#define SEERTNS_VERSION_MINOR 0
+#define SEERTNS_VERSION_MINOR 1
 #define SEERTNS_VERSION_PATCH 0
 
 /* Core result codes. The ODBC shim maps these onto SQLRETURN + SQLSTATE;
