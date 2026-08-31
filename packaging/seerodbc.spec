@@ -2,9 +2,9 @@
 #
 # SPDX-License-Identifier: CC0-1.0
 
-# RPM spec stub for Fedora. Fill in once there is a tagged release tarball.
+# RPM spec stub for Fedora.
 Name:           seerodbc
-Version:        0.0.0
+Version:        0.1.0
 Release:        %autorelease
 Summary:        Clean-room ODBC driver for Oracle Database
 License:        Apache-2.0
