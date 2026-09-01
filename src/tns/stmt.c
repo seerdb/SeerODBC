@@ -1201,11 +1201,16 @@ static SeerStatus parse_oer(SeerReader *r, SeerStmt *stmt, OerResult *oer)
         uint8_t *msg = NULL;
         size_t   mlen = 0;
         if (seer_dec_dalc(r, &msg, &mlen) == SEER_OK && msg != NULL) {
-            free(stmt->conn->last_error);
-            stmt->conn->last_error = malloc(mlen + 1);
-            if (stmt->conn->last_error != NULL) {
-                memcpy(stmt->conn->last_error, msg, mlen);
-                stmt->conn->last_error[mlen] = '\0';
+            /* Build the replacement first, then swap: the old buffer is only
+             * freed once the new one is fully populated, so no read ever touches
+             * freed memory and an allocation failure leaves the prior error
+             * intact instead of nulling it. */
+            char *nbuf = malloc(mlen + 1);
+            if (nbuf != NULL) {
+                memcpy(nbuf, msg, mlen);
+                nbuf[mlen] = '\0';
+                free(stmt->conn->last_error);
+                stmt->conn->last_error = nbuf;
             }
         }
         free(msg);

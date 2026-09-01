@@ -52,7 +52,10 @@ jobs:
         with:
           languages: ${{ matrix.language }}
           build-mode: ${{ matrix.build-mode }}
-          queries: security-and-quality
+          # The query suite (security-and-quality) and the query-filters that
+          # exclude this codebase's triaged false positives live in the config
+          # file, so the disposition is durable and reviewable in-tree.
+          config-file: ./.github/codeql/codeql-config.yml
 
       # Manual build mode: CodeQL traces this compile to build its database, so it
       # sees the whole driver (protocol core + ODBC shim + freeoracle).

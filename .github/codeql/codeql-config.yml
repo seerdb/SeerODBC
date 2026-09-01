@@ -1,0 +1,52 @@
+# SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
+# SPDX-License-Identifier: CC0-1.0
+
+# CodeQL configuration for the c-cpp analysis (referenced from
+# .github/workflows/codeql.yml via `config-file`).
+#
+# We run the full security-and-quality suite, then exclude five queries whose
+# alerts are, in this codebase, verified false positives or protocol
+# requirements rather than defects. Each was triaged individually (see the
+# per-rule notes below and PR history); inline `// codeql[...]` source
+# suppressions are NOT honored by GitHub code scanning, so the disposition is
+# expressed here instead, where it is durable and reviewable.
+
+name: SeerODBC CodeQL config
+
+queries:
+  - uses: security-and-quality
+
+query-filters:
+  # ODBC buffer-ownership contract: SQLBindCol / SQLBindParameter /
+  # SQLSetStmtAttr / SQLSetDescField hand the driver application-owned
+  # pointers whose lifetime the application guarantees. Storing them is
+  # correct; CodeQL reads every such store as an escaping stack address.
+  - exclude:
+      id: cpp/stack-address-escape
+
+  # Oracle's O5LOGON pre-11g authentication handshake mandates DES-CBC for the
+  # session-key exchange. It is a wire-protocol requirement, not data-at-rest
+  # encryption, and cannot be substituted without breaking 9i/10g auth.
+  - exclude:
+      id: cpp/weak-cryptographic-algorithm
+
+  # The "system data" flowing into the socket send() is the caller's own
+  # connection configuration (host / service / credentials / TNS options)
+  # being transmitted to the very Oracle server it is connecting to — the
+  # intended destination, not an unintended disclosure.
+  - exclude:
+      id: cpp/system-data-exposure
+
+  # Every allocation the query flags takes a length decoded from the wire that
+  # is already bounded by seer_reader / seer_reader_bytes / seer_dec_dalc
+  # against the bytes actually received. A fabricated numeric cap would be
+  # wrong here: large CLOB/BLOB/LONG values legitimately reach many MB.
+  - exclude:
+      id: cpp/uncontrolled-allocation-size
+
+  # The flagged comparisons are deliberate defensive / underflow guards
+  # (e.g. `mlen > 0` before `m[mlen-1]`, a `ncols > 4096` ceiling on a byte
+  # count) that are provably constant only in their current context and are
+  # kept intentionally as defense-in-depth.
+  - exclude:
+      id: cpp/constant-comparison

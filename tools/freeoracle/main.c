@@ -111,23 +111,31 @@ int main(int argc, char **argv)
     CliBind binds[16];
     int nbinds = 0;
 
-    for (int i = 1; i < argc; i++) {
-        if      (strcmp(argv[i], "-v") == 0) level = SEER_LOG_DEBUG;
-        else if (strcmp(argv[i], "-H") == 0 && i + 1 < argc) p.host         = argv[++i];
-        else if (strcmp(argv[i], "-p") == 0 && i + 1 < argc) p.port         = (uint16_t)atoi(argv[++i]);
-        else if (strcmp(argv[i], "-s") == 0 && i + 1 < argc) p.service_name = argv[++i];
-        else if (strcmp(argv[i], "-u") == 0 && i + 1 < argc) p.username     = argv[++i];
-        else if (strcmp(argv[i], "-P") == 0 && i + 1 < argc) p.password     = argv[++i];
-        else if (strcmp(argv[i], "-q") == 0 && i + 1 < argc) sql            = argv[++i];
-        else if (strcmp(argv[i], "-N") == 0 && i + 1 < argc && nbinds < 16) {
+    /* A while loop (rather than a for) so consuming an option's argument by
+     * advancing the index does not mutate a for-loop counter mid-body. */
+    int i = 1;
+    while (i < argc) {
+        const char *a  = argv[i++];              /* option token */
+        const char *v  = (i < argc) ? argv[i] : NULL;   /* its argument, if any */
+        int have_arg   = (v != NULL);
+        if      (strcmp(a, "-v") == 0) level = SEER_LOG_DEBUG;
+        else if (strcmp(a, "-H") == 0 && have_arg) { p.host         = v; i++; }
+        else if (strcmp(a, "-p") == 0 && have_arg) { p.port         = (uint16_t)atoi(v); i++; }
+        else if (strcmp(a, "-s") == 0 && have_arg) { p.service_name = v; i++; }
+        else if (strcmp(a, "-u") == 0 && have_arg) { p.username     = v; i++; }
+        else if (strcmp(a, "-P") == 0 && have_arg) { p.password     = v; i++; }
+        else if (strcmp(a, "-q") == 0 && have_arg) { sql            = v; i++; }
+        else if (strcmp(a, "-N") == 0 && have_arg && nbinds < 16) {
             binds[nbinds].is_text = 0;
-            binds[nbinds].ival = atoll(argv[++i]);
+            binds[nbinds].ival = atoll(v);
             nbinds++;
+            i++;
         }
-        else if (strcmp(argv[i], "-T") == 0 && i + 1 < argc && nbinds < 16) {
+        else if (strcmp(a, "-T") == 0 && have_arg && nbinds < 16) {
             binds[nbinds].is_text = 1;
-            binds[nbinds].tval = argv[++i];
+            binds[nbinds].tval = v;
             nbinds++;
+            i++;
         }
         else { usage(argv[0]); return 2; }
     }

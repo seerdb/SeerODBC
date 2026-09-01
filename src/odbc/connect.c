@@ -88,6 +88,18 @@ static int parse_purity(const char *s)
     return atoi(s);
 }
 
+/* A DSN/attribute flag is "on" when its first char is 1/y/Y/t/T. */
+static int flag_is_on(const char *s)
+{
+    return s && (s[0]=='1'||s[0]=='y'||s[0]=='Y'||s[0]=='t'||s[0]=='T');
+}
+
+/* PROTOCOL=TCPS (any case) selects TLS. */
+static int proto_is_tcps(const char *s)
+{
+    return s && (s[0]=='T'||s[0]=='t') && (s[3]=='S'||s[3]=='s');
+}
+
 /* Resolve connection parameters, then connect. Ownership of the temporary
  * strings stays local. */
 static SQLRETURN do_connect(OdbcDbc *c, const char *dsn,
@@ -125,9 +137,7 @@ static SQLRETURN do_connect(OdbcDbc *c, const char *dsn,
 
     /* TLS is requested by SSL=1/yes/true or PROTOCOL=TCPS; verification is on by
      * default (TLSVERIFY=0 disables it, e.g. for a self-signed test endpoint). */
-    int use_tls = (cssl && (cssl[0]=='1'||cssl[0]=='y'||cssl[0]=='Y'||cssl[0]=='t'||cssl[0]=='T'))
-                || (cproto && (cproto[0]=='T'||cproto[0]=='t')
-                    && (cproto[3]=='S'||cproto[3]=='s'));   /* TCPS */
+    int use_tls = flag_is_on(cssl) || proto_is_tcps(cproto);
     int tls_verify = ctlsverify ? (ctlsverify[0]!='0'&&ctlsverify[0]!='n'&&ctlsverify[0]!='N'
                                    &&ctlsverify[0]!='f'&&ctlsverify[0]!='F') : 1;
     if (ctlsca && !ctlsca[0]) { free(ctlsca); ctlsca = NULL; }   /* empty -> system roots */
