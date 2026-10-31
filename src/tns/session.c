@@ -376,6 +376,11 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
     return st;
   }
 
+  /* The connect timeout bounds connecting and logging in, not every later
+   * call: a query or a lock wait may take longer than it, and the socket
+   * timeout would kill the session mid-reply (EAGAIN -> SEER_EIO). */
+  seer_transport_set_io_timeout(conn->t, 0);
+
   *out = conn;
   return SEER_OK;
 
@@ -389,6 +394,8 @@ void seer_disconnect(SeerConn *conn)
 {
   if (conn == NULL)
     return;
+  /* Bound the best-effort logoff again, so a dead peer cannot hang it. */
+  seer_transport_set_io_timeout(conn->t, -1);
   seer_ttc_logoff(conn); /* best-effort TTI_LOGOFF + EOF on a live session */
   seer_transport_close(conn->t);
   seer_ano_free(conn->ano);
