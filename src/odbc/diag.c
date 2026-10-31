@@ -89,7 +89,9 @@ SQLRETURN seer_odbc_diag(SQLHANDLE handle, const char *state, SQLINTEGER native,
 SQLRETURN seer_odbc_exec_error(OdbcStmt *s, SeerStatus st)
 {
   SeerConn *c = s->dbc != NULL ? s->dbc->conn : NULL;
-  const char *ora = seer_last_error(c);
+  /* The server's text belongs to a database error; any other failure is
+   * described by its own status, not by whatever ORA text came last. */
+  const char *ora = st == SEER_EDB ? seer_last_error(c) : NULL;
   /* The native error is the ORA number, as SQLGetDiagRec callers expect. */
   SQLINTEGER native = (ora != NULL && strncmp(ora, "ORA-", 4) == 0) ? (SQLINTEGER)atoi(ora + 4) : 0;
   SQLRETURN r =
