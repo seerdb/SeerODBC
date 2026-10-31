@@ -98,6 +98,14 @@ test_fv2_status = executable('test_fv2_status',
 )
 test('fv2 dml status', test_fv2_status)
 
+# A LOBOPS reply's content, whole or cut short (a short chunk is an error, not
+# a silently truncated LOB).
+test_lob_content = executable('test_lob_content',
+  'unit/test_lob_content.c',
+  dependencies : [seertns_dep],
+)
+test('lob content', test_lob_content)
+
 # Accept-and-reject stubs for features not on the thin wire: sharding (§37) + CQN
 # (§38). Pure offline: the reject paths take no network.
 test_stubs = executable('test_stubs',
