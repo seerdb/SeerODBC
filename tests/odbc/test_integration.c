@@ -337,6 +337,46 @@ static void check_batch_resume_repeated_column(SQLHDBC dbc)
   }
 }
 
+/* A TIMESTAMP bind with no fractional seconds goes out in the 7-byte form:
+ * the server reads an 11-byte zero-fraction value differently, and
+ * `trunc(ltz) = :midnight` then matched nothing (seerdb #1337). */
+static void check_timestamp_zero_fraction_bind(SQLHDBC dbc)
+{
+  const char *name = "zero-fraction TIMESTAMP bind matches trunc(LTZ)";
+  char err[256] = "";
+  exec_do(dbc, "DROP TABLE seer_tsz", err, sizeof err);
+  if (!SQL_SUCCEEDED(exec_do(dbc,
+                             "CREATE TABLE seer_tsz (k NUMBER, l TIMESTAMP WITH LOCAL TIME ZONE)",
+                             err, sizeof err))) {
+    fail(name, err);
+    return;
+  }
+  exec_do(dbc, "INSERT INTO seer_tsz VALUES (1, TIMESTAMP '2026-09-25 13:45:06.123456')", err,
+          sizeof err);
+  SQLHSTMT st;
+  SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+  TIMESTAMP_STRUCT ts = {2026, 9, 25, 0, 0, 0, 0};
+  SQLLEN ind = 0;
+  char cnt[16] = "";
+  SQLRETURN rc = SQLBindParameter(st, 1, SQL_PARAM_INPUT, SQL_C_TYPE_TIMESTAMP, SQL_TYPE_TIMESTAMP,
+                                  26, 6, &ts, 0, &ind);
+  if (SQL_SUCCEEDED(rc))
+    rc = SQLExecDirect(st, (SQLCHAR *)"SELECT COUNT(*) FROM seer_tsz WHERE TRUNC(l) = ?", SQL_NTS);
+  if (SQL_SUCCEEDED(rc) && SQL_SUCCEEDED(SQLFetch(st)))
+    SQLGetData(st, 1, SQL_C_CHAR, cnt, sizeof cnt, &ind);
+  else
+    diag_text(SQL_HANDLE_STMT, st, err, sizeof err);
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  exec_do(dbc, "DROP TABLE seer_tsz", err, sizeof err);
+  if (strcmp(cnt, "1") == 0)
+    pass(name);
+  else {
+    char m[320];
+    snprintf(m, sizeof m, "count='%s' want 1 %s", cnt, err);
+    fail(name, m);
+  }
+}
+
 static void check_zero_length_columns(SQLHDBC dbc)
 {
   const char *name = "zero-length columns (NULL / '' / DECODE miss)";
@@ -3042,6 +3082,7 @@ int main(void)
   check_scalar(dbc, "SELECT literal", "SELECT 3 + 4 FROM DUAL", "7");
   check_dbms_ver(dbc);
   check_zero_length_columns(dbc);
+  check_timestamp_zero_fraction_bind(dbc);
   check_batch_resume_repeated_column(dbc);
   check_aggregate_null_warning(dbc);
   check_nested_cursor_column(dbc);
