@@ -451,6 +451,16 @@ long seer_last_error_offset(SeerConn *conn)
   return conn ? conn->last_error_offset : 0;
 }
 
+SeerStatus seer_server_version(SeerConn *conn, int version[5])
+{
+  if (conn == NULL || version == NULL)
+    return SEER_EPARAM;
+  if (conn->server_release == 0)
+    return SEER_ENOTIMPL;
+  seer_release_fields(conn->server_release, version);
+  return SEER_OK;
+}
+
 /* Continuous Query Notification (§38): not on the thin wire. CQN needs the server
  * to open a callback connection back to a client-hosted listener, which a
  * pure-protocol request/response client cannot host. Accepted for API parity and

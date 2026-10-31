@@ -207,6 +207,7 @@ static SQLRETURN do_connect(OdbcDbc *c, const char *dsn, const char *cs, const c
   }
 
   c->conn = conn;
+  c->dbms_ver[0] = '\0'; /* resolved again for this server */
   c->connected = 1;
   seer_set_autocommit(conn, c->autocommit == SQL_AUTOCOMMIT_ON);
   ret = SQL_SUCCESS;

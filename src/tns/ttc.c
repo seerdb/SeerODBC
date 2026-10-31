@@ -1503,10 +1503,32 @@ SeerStatus seer_ttc_authenticate(SeerConn *conn, const SeerConnParams *params,
 
   conn->server_release = release;
   conn->authenticated = true;
-  seer_log(SEER_LOG_INFO, "TTC: authenticated (server release %u.%u.%u.%u.%u)",
-           (release >> 24) & 0xFF, (release >> 20) & 0x0F, (release >> 12) & 0xFF,
-           (release >> 8) & 0x0F, release & 0xFF);
+  int v[5];
+  seer_release_fields(release, v);
+  seer_log(SEER_LOG_INFO, "TTC: authenticated (server release %d.%d.%d.%d.%d)", v[0], v[1], v[2],
+           v[3], v[4]);
   return SEER_OK;
+}
+
+/* The five dotted fields of a release word (seerdb PROTOCOL.md, AUTH_VERSION_NO).
+ * Before 18c: major (bits 24-31), minor (20-23), app (12-19), component (8-11),
+ * platform (0-7). From 18c the release update's: major (24-31), update (16-23),
+ * revision (12-15), increment (4-11), extension (0-3) - the older reading
+ * gave 23ai's word as 23.1.162.0.0 instead of 23.26.2.0.0. */
+void seer_release_fields(uint32_t r, int v[5])
+{
+  v[0] = (int)(r >> 24 & 0xFF);
+  if (v[0] >= 18) {
+    v[1] = (int)(r >> 16 & 0xFF);
+    v[2] = (int)(r >> 12 & 0x0F);
+    v[3] = (int)(r >> 4 & 0xFF);
+    v[4] = (int)(r & 0x0F);
+  } else {
+    v[1] = (int)(r >> 20 & 0x0F);
+    v[2] = (int)(r >> 12 & 0xFF);
+    v[3] = (int)(r >> 8 & 0x0F);
+    v[4] = (int)(r & 0xFF);
+  }
 }
 
 /* Request-boundary (§35) piggyback helpers, used by the execute builder and the

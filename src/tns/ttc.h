@@ -69,6 +69,10 @@ SeerStatus seer_ttc_ano_negotiate(SeerConn *conn);
 /* Next per-connection TTC sequence number (1..127, wrapping). */
 uint8_t seer_ttc_next_seq(SeerConn *conn);
 
+/* Split a server release word into its five dotted fields, in the layout of
+ * its major release (pre-18c or 18c+). */
+void seer_release_fields(uint32_t release, int version[5]);
+
 /* Encode a request-boundary (session-state) piggyback (§35) into `w`: func-176,
  * `seq`, an optional ub8 token (fv > 23.1), then the var-int state with the
  * explicit-boundary bit OR'd in. Pure/testable. */

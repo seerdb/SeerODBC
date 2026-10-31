@@ -9,6 +9,7 @@
  * SPDX-FileCopyrightText: © 2026 Peter Lemenkov and the SeerODBC contributors
  * SPDX-License-Identifier: Apache-2.0
  */
+#include <stdio.h>
 #include <string.h>
 
 #include "odbc_internal.h"
@@ -43,6 +44,45 @@ static SQLRETURN info_u32(SQLUINTEGER val, SQLPOINTER buf)
   return SQL_SUCCESS;
 }
 
+/* The release fields as SQL_DBMS_VER's "##.##.####" (major, minor or update,
+ * then the next two fields), followed - as the spec allows - by the full
+ * dotted release: e.g. "23.26.0200 Oracle 23.26.2.0.0". */
+static void format_dbms_ver(const int v[5], char *out, size_t n)
+{
+  snprintf(out, n, "%02d.%02d.%04d Oracle %d.%d.%d.%d.%d", v[0], v[1], v[2] * 100 + v[3], v[0],
+           v[1], v[2], v[3], v[4]);
+}
+
+/* The connected server's release. 10g+ sends it at login; a 9i login does
+ * not, so it is asked for once (product_component_version, readable by every
+ * user). Cached on the connection; "00.00.0000" if it cannot be had. */
+static const char *dbms_ver(OdbcDbc *c)
+{
+  if (c == NULL || c->conn == NULL)
+    return "00.00.0000";
+  if (c->dbms_ver[0] != '\0')
+    return c->dbms_ver;
+  int v[5] = {0};
+  if (seer_server_version(c->conn, v) == SEER_OK) {
+    format_dbms_ver(v, c->dbms_ver, sizeof c->dbms_ver);
+    return c->dbms_ver;
+  }
+  SeerStmt *s = NULL;
+  if (seer_stmt_prepare(c->conn,
+                        "SELECT version FROM product_component_version "
+                        "WHERE product LIKE 'Oracle%' AND ROWNUM = 1",
+                        &s) == SEER_OK &&
+      seer_stmt_execute(s) == SEER_OK && seer_stmt_fetch(s) == SEER_OK) {
+    const char *txt = NULL;
+    int isnull = 0;
+    if (seer_stmt_get_string(s, 0, &txt, &isnull) == SEER_OK && txt != NULL &&
+        sscanf(txt, "%d.%d.%d.%d.%d", &v[0], &v[1], &v[2], &v[3], &v[4]) >= 2)
+      format_dbms_ver(v, c->dbms_ver, sizeof c->dbms_ver);
+  }
+  seer_stmt_close(s);
+  return c->dbms_ver[0] != '\0' ? c->dbms_ver : "00.00.0000";
+}
+
 SQLRETURN SQL_API SQLGetInfo(SQLHDBC ConnectionHandle, SQLUSMALLINT InfoType,
                              SQLPOINTER InfoValuePtr, SQLSMALLINT BufferLength,
                              SQLSMALLINT *StringLengthPtr)
@@ -62,7 +102,7 @@ SQLRETURN SQL_API SQLGetInfo(SQLHDBC ConnectionHandle, SQLUSMALLINT InfoType,
   case SQL_DBMS_NAME:
     return info_string("Oracle", InfoValuePtr, BufferLength, StringLengthPtr);
   case SQL_DBMS_VER:
-    return info_string("11.02.0000", InfoValuePtr, BufferLength, StringLengthPtr);
+    return info_string(dbms_ver(c), InfoValuePtr, BufferLength, StringLengthPtr);
   case SQL_ODBC_VER:
     return info_string("03.80.0000", InfoValuePtr, BufferLength, StringLengthPtr);
 
