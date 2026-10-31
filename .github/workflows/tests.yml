@@ -83,6 +83,22 @@ jobs:
         run: meson compile -C build
       - name: Unit tests
         run: meson test -C build --print-errorlogs
+      - name: Homebrew formula (from this tree's source tarball)
+        # packaging/homebrew/seerodbc.rb builds a release tag's tarball; here it
+        # is pointed at a `meson dist` tarball of the PR's own tree instead, and
+        # installed and tested from a throwaway local tap (Homebrew installs
+        # formulae from taps only).
+        run: |
+          meson dist -C build --no-tests --allow-dirty
+          tarball="$PWD/$(ls build/meson-dist/*.tar.xz)"
+          sha=$(shasum -a 256 "$tarball" | cut -d' ' -f1)
+          brew tap-new --no-git seerodbc-ci/local
+          tapdir="$(brew --repository)/Library/Taps/seerodbc-ci/homebrew-local/Formula"
+          sed -e "s|^  url .*|  url \"file://${tarball}\"|" \
+              -e "s|^  sha256 .*|  sha256 \"${sha}\"|" \
+              packaging/homebrew/seerodbc.rb > "$tapdir/seerodbc.rb"
+          brew install --build-from-source seerodbc-ci/local/seerodbc
+          brew test seerodbc-ci/local/seerodbc
 
   # Offline build + unit tests on Windows via the MSYS2 / MinGW-w64 toolchain.
   # The protocol core compiles against Winsock through src/common/netcompat.h (the
