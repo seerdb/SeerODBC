@@ -1319,10 +1319,21 @@ static SeerStatus parse_oer(SeerReader *r, SeerStmt *stmt, OerResult *oer)
   (void)seer_dec_sb4(r); /* array elem error 2 */
   oer->cursor_id = seer_dec_sb4(r);
   oer->err_offset = seer_dec_sb4(r); /* error position (parse offset) */
-  /* sql_type .. warn_flags (6 x ub1): the last is a real signal (§6.3a) */
-  const uint8_t *six = seer_reader_bytes(r, 6);
-  if (six != NULL)
-    oer->warn_flags = six[5];
+  /* sql_type, fatal, flags, user_cursor_options, upi_param, warn_flags: the
+   * last is a real signal (§6.3a). Below 12.1 `flags` is a variable-length
+   * ub2 - `00` when clear, `01 20` when a warning (e.g. an aggregate that
+   * skipped NULLs) sets it - so it cannot be read as one byte there. */
+  if (stmt->conn->field_version >= TTC_FIELD_VERSION_12_1) {
+    const uint8_t *six = seer_reader_bytes(r, 6);
+    if (six != NULL)
+      oer->warn_flags = six[5];
+  } else {
+    seer_reader_bytes(r, 2); /* sql_type, fatal */
+    (void)seer_dec_sb4(r);   /* flags (ub2)     */
+    const uint8_t *three = seer_reader_bytes(r, 3);
+    if (three != NULL)
+      oer->warn_flags = three[2];
+  }
   (void)seer_dec_sb4(r);          /* rowid: data object  */
   (void)seer_dec_sb4(r);          /* rowid: file         */
   seer_reader_bytes(r, 1);        /* rowid: reserved     */
