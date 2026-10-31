@@ -573,21 +573,54 @@ void seer_ttc_fun_header(SeerConn *c, SeerWriter *w, uint8_t opcode)
  * compile_caps[40] bit 0x40 AND runtime_caps[6] bit 0x10). Returns SEER_EPROTO
  * on a bounds violation reading the field version; the request-boundary probe is
  * best-effort and never fails the login (*req_bnd defaults to false). */
+/* The major release named in a PRO banner ("...8.1.7..." -> 8): the first
+ * "<n>.<n>.<n>" in it, 0 when there is none. */
+static int banner_major(const uint8_t *s, size_t n)
+{
+  for (size_t i = 0; i < n; i++) {
+    if (s[i] < '0' || s[i] > '9' || (i > 0 && s[i - 1] >= '0' && s[i - 1] <= '9'))
+      continue;
+    size_t j = i;
+    int major = 0, dots = 0;
+    while (j < n && s[j] >= '0' && s[j] <= '9')
+      major = major * 10 + (s[j++] - '0');
+    for (int part = 0; part < 2; part++) {
+      if (j + 1 < n && s[j] == '.' && s[j + 1] >= '0' && s[j + 1] <= '9') {
+        j++;
+        while (j < n && s[j] >= '0' && s[j] <= '9')
+          j++;
+        dots++;
+      }
+    }
+    if (dots == 2)
+      return major;
+  }
+  return 0;
+}
+
+/* `*server_fv` is 0 when the reply carries no compile caps at all - Oracle 8i,
+ * whose PRO has none (seerdb PROTOCOL.md §19.8); `*major` (may be NULL) is the
+ * banner's release. */
 static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv, bool *req_bnd,
-                            bool *str32k)
+                            bool *str32k, int *major)
 {
   if (req_bnd != NULL)
     *req_bnd = false;
   if (str32k != NULL)
     *str32k = false;
+  if (major != NULL)
+    *major = 0;
   size_t o = 0;
   if (n < 1 || b[0] != TTI_PRO)
     return SEER_EPROTO;
   o = 1;
-  o += 1;                    /* server version byte */
-  o += 1;                    /* trailing zero       */
+  o += 1; /* server version byte */
+  o += 1; /* trailing zero       */
+  size_t banner = o;
   while (o < n && b[o] != 0) /* NUL-terminated banner */
     o++;
+  if (major != NULL)
+    *major = banner_major(b + banner, o - banner);
   o += 1; /* the NUL itself */
   o += 2; /* charset id (LE) */
   o += 1; /* server flags    */
@@ -605,6 +638,10 @@ static SeerStatus parse_pro(const uint8_t *b, size_t n, uint8_t *server_fv, bool
     return SEER_EPROTO;
   uint8_t cclen = b[o];
   o += 1;
+  if (cclen == 0) { /* no caps to negotiate: 8i */
+    *server_fv = 0;
+    return SEER_OK;
+  }
   if (cclen < 8 || o + cclen > n)
     return SEER_EPROTO;
   *server_fv = b[o + 7]; /* CCAP_FIELD_VERSION */
@@ -1015,7 +1052,81 @@ static SeerStatus fast_auth_login(SeerConn *conn, const SeerConnParams *params,
   return st;
 }
 
+/* Oracle 8i's DTY, captured from a 9.2 client logging in to 8.1.7 (seerdb
+ * _DTY_8I, PROTOCOL.md §19.8): the TTI_DTY token, charset and national
+ * charset WE8ISO8859P1 (31) - 8i has no Unicode charset -, the 26-byte fv2
+ * capability vector, the database time-zone block at UTC, then the 8i
+ * conversion table, which predates ~37 later types. The modern DTY draws
+ * ORA-03120 on the OSESSKEY that follows. 1019 bytes. */
+static const uint8_t DTY_8I[] = {
+    0x02, 0x1f, 0x00, 0x1f, 0x00, 0x02, 0x15, 0x06, 0x01, 0x01, 0x01, 0x05, 0x01, 0x01, 0x02, 0x01,
+    0x01, 0x01, 0x01, 0x01, 0x01, 0x01, 0x7f, 0x0f, 0x03, 0x06, 0x03, 0x00, 0x02, 0x02, 0x01, 0x80,
+    0x00, 0x00, 0x00, 0x3c, 0x3c, 0x3c, 0x80, 0x00, 0x00, 0x00, 0x01, 0x01, 0x01, 0x00, 0x02, 0x02,
+    0x0a, 0x00, 0x08, 0x08, 0x01, 0x00, 0x0c, 0x0c, 0x0a, 0x00, 0x17, 0x17, 0x01, 0x00, 0x18, 0x18,
+    0x01, 0x00, 0x19, 0x19, 0x18, 0x19, 0x01, 0x00, 0x1a, 0x1a, 0x19, 0x1a, 0x01, 0x00, 0x1b, 0x1b,
+    0x0a, 0x1b, 0x01, 0x00, 0x1c, 0x1c, 0x16, 0x1c, 0x01, 0x00, 0x1d, 0x1d, 0x17, 0x1d, 0x01, 0x00,
+    0x1e, 0x1e, 0x17, 0x1e, 0x01, 0x00, 0x1f, 0x1f, 0x19, 0x1f, 0x01, 0x00, 0x20, 0x20, 0x0c, 0x20,
+    0x01, 0x00, 0x21, 0x21, 0x0c, 0x21, 0x01, 0x00, 0x0a, 0x0a, 0x01, 0x00, 0x0b, 0x0b, 0x01, 0x00,
+    0x22, 0x22, 0x01, 0x00, 0x23, 0x23, 0x01, 0x23, 0x01, 0x00, 0x24, 0x24, 0x01, 0x00, 0x25, 0x25,
+    0x01, 0x00, 0x26, 0x26, 0x01, 0x00, 0x28, 0x28, 0x01, 0x00, 0x29, 0x29, 0x01, 0x00, 0x2a, 0x2a,
+    0x01, 0x00, 0x2b, 0x2b, 0x01, 0x00, 0x2c, 0x2c, 0x01, 0x00, 0x2d, 0x2d, 0x01, 0x00, 0x2e, 0x2e,
+    0x01, 0x00, 0x2f, 0x2f, 0x01, 0x00, 0x30, 0x30, 0x01, 0x00, 0x31, 0x31, 0x01, 0x00, 0x32, 0x32,
+    0x01, 0x00, 0x33, 0x33, 0x01, 0x00, 0x34, 0x34, 0x01, 0x00, 0x35, 0x35, 0x01, 0x00, 0x36, 0x36,
+    0x01, 0x00, 0x37, 0x37, 0x01, 0x00, 0x38, 0x38, 0x01, 0x00, 0x39, 0x39, 0x01, 0x00, 0x3b, 0x3b,
+    0x01, 0x00, 0x3c, 0x3c, 0x01, 0x00, 0x3d, 0x3d, 0x01, 0x00, 0x3e, 0x3e, 0x01, 0x00, 0x3f, 0x3f,
+    0x01, 0x00, 0x40, 0x40, 0x01, 0x00, 0x41, 0x41, 0x01, 0x00, 0x42, 0x42, 0x01, 0x00, 0x43, 0x43,
+    0x01, 0x00, 0x47, 0x47, 0x01, 0x00, 0x48, 0x48, 0x01, 0x00, 0x49, 0x49, 0x01, 0x00, 0x4b, 0x4b,
+    0x01, 0x00, 0x4d, 0x4d, 0x01, 0x00, 0x4e, 0x4e, 0x01, 0x00, 0x4f, 0x4f, 0x01, 0x00, 0x50, 0x50,
+    0x01, 0x00, 0x51, 0x51, 0x01, 0x00, 0x52, 0x52, 0x01, 0x00, 0x53, 0x53, 0x01, 0x00, 0x54, 0x54,
+    0x01, 0x00, 0x55, 0x55, 0x01, 0x00, 0x56, 0x56, 0x01, 0x00, 0x57, 0x57, 0x01, 0x57, 0x01, 0x00,
+    0x59, 0x59, 0x01, 0x00, 0x5a, 0x5a, 0x01, 0x00, 0x5c, 0x5c, 0x01, 0x00, 0x5d, 0x5d, 0x01, 0x00,
+    0x62, 0x62, 0x01, 0x00, 0x63, 0x63, 0x01, 0x00, 0x67, 0x67, 0x01, 0x00, 0x6b, 0x6b, 0x01, 0x00,
+    0x75, 0x75, 0x01, 0x00, 0x78, 0x78, 0x01, 0x00, 0x7c, 0x7c, 0x01, 0x42, 0x01, 0x00, 0x7d, 0x7d,
+    0x01, 0x00, 0x7e, 0x7e, 0x01, 0x00, 0x7f, 0x7f, 0x01, 0x00, 0x80, 0x80, 0x01, 0x00, 0x81, 0x81,
+    0x01, 0x00, 0x82, 0x82, 0x01, 0x00, 0x83, 0x83, 0x01, 0x00, 0x84, 0x84, 0x01, 0x00, 0x85, 0x85,
+    0x01, 0x00, 0x86, 0x86, 0x01, 0x00, 0x87, 0x87, 0x01, 0x00, 0x89, 0x89, 0x01, 0x00, 0x8a, 0x8a,
+    0x01, 0x00, 0x8b, 0x8b, 0x01, 0x00, 0x8c, 0x8c, 0x01, 0x00, 0x8d, 0x8d, 0x01, 0x00, 0x8e, 0x8e,
+    0x01, 0x00, 0x8f, 0x8f, 0x01, 0x00, 0x90, 0x90, 0x01, 0x00, 0x91, 0x91, 0x01, 0x00, 0x94, 0x94,
+    0x01, 0x25, 0x01, 0x00, 0x95, 0x95, 0x01, 0x00, 0x96, 0x96, 0x01, 0x00, 0x97, 0x97, 0x01, 0x00,
+    0x9d, 0x9d, 0x01, 0x00, 0x9e, 0x9e, 0x01, 0x00, 0x9f, 0x9f, 0x01, 0x00, 0xa0, 0xa0, 0x01, 0x00,
+    0xa1, 0xa1, 0x01, 0x00, 0xa2, 0xa2, 0x01, 0x00, 0xa3, 0xa3, 0x01, 0x00, 0xa4, 0xa4, 0x01, 0x00,
+    0xa5, 0xa5, 0x01, 0x00, 0xa6, 0xa6, 0x01, 0x00, 0xa7, 0xa7, 0x01, 0x00, 0xa8, 0xa8, 0x01, 0x00,
+    0xa9, 0xa9, 0x01, 0x00, 0xaa, 0xaa, 0x01, 0x00, 0xab, 0xab, 0x01, 0x00, 0xad, 0xad, 0x01, 0x00,
+    0xae, 0xae, 0x01, 0x00, 0xaf, 0xaf, 0x01, 0x00, 0xb0, 0xb0, 0x01, 0x00, 0xb1, 0xb1, 0x01, 0x00,
+    0xc1, 0xc1, 0x01, 0x00, 0xc2, 0xc2, 0x01, 0x25, 0x01, 0x00, 0xc6, 0xc6, 0x01, 0x00, 0xc7, 0xc7,
+    0x01, 0x00, 0xc8, 0xc8, 0x01, 0x00, 0xc9, 0xc9, 0x01, 0x00, 0xca, 0xca, 0x01, 0x9f, 0x01, 0x00,
+    0xcb, 0xcb, 0x01, 0xa0, 0x01, 0x00, 0xcc, 0xcc, 0x01, 0xa2, 0x01, 0x00, 0xcd, 0xcd, 0x01, 0xa3,
+    0x01, 0x00, 0xce, 0xce, 0x01, 0xb1, 0x01, 0x00, 0xcf, 0xcf, 0x01, 0x22, 0x01, 0x00, 0xd2, 0xd2,
+    0x01, 0x00, 0xd3, 0xd3, 0x01, 0xab, 0x01, 0x00, 0xd4, 0xd4, 0x01, 0x00, 0xd5, 0xd5, 0x01, 0x00,
+    0xd6, 0xd6, 0x01, 0x00, 0xd7, 0xd7, 0x01, 0x00, 0xd8, 0xd8, 0x01, 0x00, 0xd9, 0xd9, 0x01, 0x00,
+    0xda, 0xda, 0x01, 0x00, 0xdb, 0xdb, 0x01, 0x00, 0xdc, 0xdc, 0x01, 0x00, 0xdd, 0xdd, 0x01, 0x00,
+    0xde, 0xde, 0x01, 0x00, 0xdf, 0xdf, 0x01, 0x00, 0xe0, 0xe0, 0x01, 0x00, 0xe1, 0xe1, 0x01, 0x00,
+    0xe2, 0xe2, 0x01, 0x00, 0xe3, 0xe3, 0x01, 0x6b, 0x01, 0x00, 0xe4, 0xe4, 0x01, 0x00, 0xe5, 0xe5,
+    0x01, 0x00, 0xe6, 0xe6, 0x01, 0x00, 0xea, 0xea, 0x01, 0x00, 0xeb, 0xeb, 0x01, 0x00, 0xec, 0xec,
+    0x01, 0x00, 0xed, 0xed, 0x01, 0x00, 0xee, 0xee, 0x01, 0x00, 0xef, 0xef, 0x01, 0x00, 0xf2, 0xf2,
+    0x01, 0x00, 0xf4, 0xf4, 0x01, 0x00, 0xf5, 0xf5, 0x01, 0x00, 0x03, 0x02, 0x0a, 0x00, 0x04, 0x02,
+    0x0a, 0x00, 0x05, 0x01, 0x01, 0x00, 0x06, 0x02, 0x0a, 0x00, 0x07, 0x02, 0x0a, 0x00, 0x09, 0x01,
+    0x01, 0x00, 0x0d, 0x00, 0x0e, 0x00, 0x0f, 0x17, 0x01, 0x00, 0x10, 0x00, 0x11, 0x00, 0x12, 0x00,
+    0x13, 0x00, 0x14, 0x00, 0x15, 0x00, 0x16, 0x00, 0x27, 0x78, 0x01, 0x5d, 0x01, 0x26, 0x01, 0x00,
+    0x3a, 0x6d, 0x01, 0x00, 0x44, 0x02, 0x0a, 0x00, 0x45, 0x00, 0x46, 0x00, 0x4a, 0x6d, 0x01, 0x00,
+    0x4c, 0x00, 0x58, 0x00, 0x5b, 0x02, 0x0a, 0x00, 0x5e, 0x01, 0x01, 0x00, 0x5f, 0x17, 0x01, 0x00,
+    0x60, 0x60, 0x01, 0x00, 0x61, 0x60, 0x01, 0x00, 0x64, 0x00, 0x65, 0x00, 0x66, 0x66, 0x01, 0x00,
+    0x68, 0x00, 0x69, 0x00, 0x6a, 0x6a, 0x01, 0x00, 0x6c, 0x6d, 0x01, 0x00, 0x6d, 0x6d, 0x01, 0x00,
+    0x6e, 0x6f, 0x01, 0x00, 0x6f, 0x6f, 0x01, 0x00, 0x70, 0x70, 0x01, 0x00, 0x71, 0x71, 0x01, 0x00,
+    0x72, 0x72, 0x01, 0x00, 0x73, 0x73, 0x01, 0x00, 0x74, 0x66, 0x01, 0x00, 0x76, 0x00, 0x77, 0x00,
+    0x79, 0x6d, 0x01, 0x00, 0x7a, 0x6d, 0x01, 0x00, 0x7b, 0x6d, 0x01, 0x00, 0x88, 0x00, 0x92, 0x92,
+    0x01, 0x00, 0x93, 0x93, 0x01, 0x00, 0x98, 0x02, 0x0a, 0x00, 0x99, 0x02, 0x0a, 0x00, 0x9a, 0x02,
+    0x0a, 0x00, 0x9b, 0x01, 0x01, 0x00, 0x9c, 0x0c, 0x0a, 0x00, 0xac, 0x02, 0x0a, 0x00, 0xb2, 0xb2,
+    0x01, 0x00, 0xb3, 0xb3, 0x01, 0x00, 0xb4, 0xb4, 0x01, 0x00, 0xb5, 0xb5, 0x01, 0x00, 0xb6, 0xb6,
+    0x01, 0x00, 0xb7, 0xb7, 0x01, 0x00, 0xb8, 0x0c, 0x0a, 0x00, 0xb9, 0xb2, 0x01, 0x00, 0xba, 0xb3,
+    0x01, 0x00, 0xbb, 0xb4, 0x01, 0x00, 0xbc, 0xb5, 0x01, 0x00, 0xbd, 0xb6, 0x01, 0x00, 0xbe, 0xb7,
+    0x01, 0x00, 0xbf, 0x00, 0xc0, 0x00, 0xc3, 0x70, 0x01, 0x00, 0xc4, 0x71, 0x01, 0x00, 0xc5, 0x72,
+    0x01, 0x00, 0xd0, 0xd0, 0x01, 0x00, 0xd1, 0x00, 0xe7, 0xe7, 0x01, 0x00, 0xe8, 0xe7, 0x01, 0x00,
+    0xe9, 0x00, 0xf0, 0x00, 0xf1, 0x6d, 0x01, 0x00, 0xf3, 0x00, 0x00,
+};
+
 static SeerStatus o3logon_login(SeerConn *conn, const SeerConnParams *params);
+static SeerStatus o8i_login(SeerConn *conn, const SeerConnParams *params);
 
 SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
                           SeerAuthChallenge *out_challenge)
@@ -1035,8 +1146,18 @@ SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
     return st;
   uint8_t server_fv = 0;
   bool req_bnd = false, str32k = false;
-  st = parse_pro(resp, rlen, &server_fv, &req_bnd, &str32k);
+  int major = 0;
+  st = parse_pro(resp, rlen, &server_fv, &req_bnd, &str32k, &major);
   free(resp);
+  /* Oracle 8i (8.1.x) carries no caps to negotiate: pin field version 2, as
+   * 9i, and take the 8i login and statement dialect (seerdb §19.8). */
+  if ((st != SEER_OK || server_fv == 0) && major == 8) {
+    conn->is_8i = true;
+    server_fv = TTC_FIELD_VERSION_9_2;
+    st = SEER_OK;
+  }
+  if (st == SEER_OK && server_fv == 0)
+    st = SEER_EPROTO;
   if (st != SEER_OK) {
     seer_log(SEER_LOG_ERROR, "ttc: could not parse PRO reply");
     return st;
@@ -1066,12 +1187,16 @@ SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
     return fast_auth_login(conn, params, out_challenge);
 
   /* --- TTI_DTY: data-type negotiation --- */
-  SeerWriter dty;
-  st = build_dty(&dty, conn->field_version, conn->supports_eor);
-  if (st != SEER_OK)
-    return st;
-  st = seer_ttc_send(conn, dty.buf, dty.len);
-  seer_writer_free(&dty);
+  if (conn->is_8i) {
+    st = seer_ttc_send(conn, DTY_8I, sizeof DTY_8I);
+  } else {
+    SeerWriter dty;
+    st = build_dty(&dty, conn->field_version, conn->supports_eor);
+    if (st != SEER_OK)
+      return st;
+    st = seer_ttc_send(conn, dty.buf, dty.len);
+    seer_writer_free(&dty);
+  }
   if (st != SEER_OK)
     return st;
   st = seer_ttc_recv(conn, &resp, &rlen);
@@ -1087,6 +1212,8 @@ SeerStatus seer_ttc_login(SeerConn *conn, const SeerConnParams *params,
 
   /* Oracle 9i (fv2): the pre-10g O3LOGON DES flow, not the O5LOGON TTI_SESS
    * challenge. o3logon_login authenticates the connection in place. */
+  if (conn->is_8i)
+    return o8i_login(conn, params);
   if (conn->field_version < TTC_FIELD_VERSION_10_2)
     return o3logon_login(conn, params);
 
@@ -1265,6 +1392,279 @@ static SeerStatus o3logon_login(SeerConn *conn, const SeerConnParams *params)
   }
   conn->authenticated = true;
   seer_log(SEER_LOG_INFO, "TTC: authenticated (O3LOGON / 9i, fv=%u)", conn->field_version);
+  return SEER_OK;
+}
+
+/* ------------------------------------------------------- Oracle 8i login */
+
+/* 8i's login integers are fixed-width little-endian (8i is x86), not the
+ * variable-width TTC form. */
+static void o8i_le32(SeerWriter *w, uint32_t v)
+{
+  for (int i = 0; i < 4; i++)
+    seer_writer_u8(w, (uint8_t)(v >> (8 * i)));
+}
+
+/* The longest informational value an 8i key-value field carries: its ub1
+ * length stops at 252 - 253..255 are TTC markers, and 8.1.7 fails the login
+ * on them (seerdb #1773). */
+#define O8I_INFO_VALUE_MAX 252
+
+/* One AUTH_ pair at 8i's widths (seerdb _AUTH_PAIR): a ub4 key length and the
+ * key as a value (ub1 length + bytes), a ub4 value length and the value - none
+ * at all when empty, as 8.1.7 writes one - then a ub4 flags word (0). */
+static void o8i_pair(SeerWriter *w, const char *key, const char *val)
+{
+  size_t kl = strlen(key), vl = strlen(val);
+  if (vl > O8I_INFO_VALUE_MAX)
+    vl = O8I_INFO_VALUE_MAX;
+  o8i_le32(w, (uint32_t)kl);
+  seer_writer_u8(w, (uint8_t)kl);
+  seer_writer_bytes(w, (const uint8_t *)key, kl);
+  o8i_le32(w, (uint32_t)vl);
+  if (vl > 0) {
+    seer_writer_u8(w, (uint8_t)vl);
+    seer_writer_bytes(w, (const uint8_t *)val, vl);
+  }
+  o8i_le32(w, 0);
+}
+
+/* Build one 8i login call (seerdb _AUTH_HEAD at the 8i codec's widths):
+ * OSESSKEY (TTI_SESS, mode 1) or OAUTH (TTI_AUTH, mode 0x101). A pointer, the
+ * user's ub4 length, the ub4 mode, a pointer, the ub4 pair count, two
+ * pointers, the user as a value, then the pairs: AUTH_PASSWORD first when
+ * given, the informational ones, and AUTH_ACL on the OAUTH. */
+SeerStatus seer_o8i_build_login(SeerConn *conn, SeerWriter *w, uint8_t op, const char *user,
+                                uint32_t mode, const char *password_field, const char *host,
+                                const char *pid)
+{
+  size_t ulen = strlen(user);
+  if (ulen > O8I_INFO_VALUE_MAX)
+    return SEER_EPARAM;
+  uint32_t npairs = 3 + (password_field != NULL ? 2 : 0);
+  if (!seer_writer_init(w, 256 + ulen + strlen(host)))
+    return SEER_ENOMEM;
+  seer_ttc_fun_header(conn, w, op);
+  seer_writer_u8(w, 1); /* pointer */
+  o8i_le32(w, (uint32_t)ulen);
+  o8i_le32(w, mode);
+  seer_writer_u8(w, 1); /* pointer */
+  o8i_le32(w, npairs);
+  seer_writer_u8(w, 1); /* pointers */
+  seer_writer_u8(w, 1);
+  seer_writer_u8(w, (uint8_t)ulen);
+  seer_writer_bytes(w, (const uint8_t *)user, ulen);
+  if (password_field != NULL)
+    o8i_pair(w, "AUTH_PASSWORD", password_field);
+  o8i_pair(w, "AUTH_PROGRAM_NM", "seerodbc");
+  o8i_pair(w, "AUTH_MACHINE", host);
+  o8i_pair(w, "AUTH_PID", pid);
+  if (password_field != NULL)
+    o8i_pair(w, "AUTH_ACL", "8000");
+  if (!seer_writer_ok(w)) {
+    seer_writer_free(w);
+    return SEER_ENOMEM;
+  }
+  return SEER_OK;
+}
+
+static SeerStatus o8i_login_call(SeerConn *conn, uint8_t op, const char *user, uint32_t mode,
+                                 const char *password_field)
+{
+  char host[256];
+  if (gethostname(host, sizeof host - 1) != 0)
+    strcpy(host, "localhost");
+  host[sizeof host - 1] = '\0';
+  char pid[16];
+  snprintf(pid, sizeof pid, "%ld", (long)getpid());
+  SeerWriter w;
+  SeerStatus st = seer_o8i_build_login(conn, &w, op, user, mode, password_field, host, pid);
+  if (st != SEER_OK)
+    return st;
+  st = seer_ttc_send(conn, w.buf, w.len);
+  seer_writer_free(&w);
+  return st;
+}
+
+/* Read an 8i login value: a ub1 length and the bytes, or 0xFE then ub1-length
+ * chunks to a zero length. Returns the bytes (malloc'd, NUL-terminated). */
+static SeerStatus o8i_read_value(const uint8_t *b, size_t n, size_t *pos, char **out)
+{
+  *out = NULL;
+  if (*pos >= n)
+    return SEER_EPROTO;
+  SeerWriter acc;
+  if (!seer_writer_init(&acc, 32))
+    return SEER_ENOMEM;
+  uint8_t len = b[(*pos)++];
+  if (len != 0xFE) {
+    if (*pos + len > n) {
+      seer_writer_free(&acc);
+      return SEER_EPROTO;
+    }
+    seer_writer_bytes(&acc, b + *pos, len);
+    *pos += len;
+  } else {
+    for (;;) {
+      if (*pos >= n) {
+        seer_writer_free(&acc);
+        return SEER_EPROTO;
+      }
+      uint8_t cl = b[(*pos)++];
+      if (cl == 0)
+        break;
+      if (*pos + cl > n) {
+        seer_writer_free(&acc);
+        return SEER_EPROTO;
+      }
+      seer_writer_bytes(&acc, b + *pos, cl);
+      *pos += cl;
+    }
+  }
+  seer_writer_u8(&acc, 0);
+  if (!seer_writer_ok(&acc)) {
+    seer_writer_free(&acc);
+    return SEER_ENOMEM;
+  }
+  *out = (char *)acc.buf;
+  return SEER_OK;
+}
+
+static uint32_t o8i_rd32(const uint8_t *p)
+{
+  return (uint32_t)p[0] | (uint32_t)p[1] << 8 | (uint32_t)p[2] << 16 | (uint32_t)p[3] << 24;
+}
+
+/* The value of `key` in an 8i login reply (seerdb _PRE10_AUTH_REPLY): TTI_RPA,
+ * a ub2 pair count, the pairs at _AUTH_PAIR's 8i widths. A key's length may
+ * count a NUL terminator (8.1.7's AUTH_NLS_ keys), so it is compared without
+ * one. SEER_OK with *val NULL when the reply is pairs but lacks the key. */
+SeerStatus seer_o8i_auth_value(const uint8_t *b, size_t n, const char *key, char **val)
+{
+  *val = NULL;
+  if (n < 3 || b[0] != TTI_RPA)
+    return SEER_EPROTO;
+  size_t pos = 1;
+  unsigned count = (unsigned)(b[pos] | b[pos + 1] << 8);
+  pos += 2;
+  for (unsigned i = 0; i < count; i++) {
+    char *k = NULL, *v = NULL;
+    if (pos + 4 > n)
+      return SEER_EPROTO;
+    uint32_t kl = o8i_rd32(b + pos);
+    pos += 4;
+    if (kl > 0 && o8i_read_value(b, n, &pos, &k) != SEER_OK)
+      return SEER_EPROTO;
+    if (pos + 4 > n) {
+      free(k);
+      return SEER_EPROTO;
+    }
+    uint32_t vl = o8i_rd32(b + pos);
+    pos += 4;
+    if (vl > 0 && o8i_read_value(b, n, &pos, &v) != SEER_OK) {
+      free(k);
+      return SEER_EPROTO;
+    }
+    if (pos + 4 > n) {
+      free(k);
+      free(v);
+      return SEER_EPROTO;
+    }
+    pos += 4; /* flags */
+    if (*val == NULL && k != NULL && strcmp(k, key) == 0) {
+      *val = v != NULL ? v : strdup("");
+      v = NULL;
+    }
+    free(k);
+    free(v);
+  }
+  return SEER_OK;
+}
+
+/* The ORA code of an 8i status (TTI_OER, ub4 LE rows, ub2 LE code; seerdb
+ * _O8I_STATUS), 0 if `b` is not one. */
+static int64_t o8i_status_code(const uint8_t *b, size_t n)
+{
+  if (n < 7 || b[0] != TTI_OER)
+    return 0;
+  return (int64_t)(b[5] | b[6] << 8);
+}
+
+/* Oracle 8i's O3LOGON (seerdb PROTOCOL.md §19.8): 9i's DES crypto, carried in
+ * the 10g-style OSESSKEY / OAUTH envelope at 8i's fixed little-endian widths
+ * (9i's positional TTI_3LOGA draws an OER on 8i). Phase 1 returns the 8-byte
+ * session key as AUTH_SESSKEY (ASCII hex); phase 2 sends AUTH_PASSWORD =
+ * upper-hex(DES blocks) + the decimal pad count, and a reply of pairs - not a
+ * status - means authenticated; there is no server proof to check. */
+static SeerStatus o8i_login(SeerConn *conn, const SeerConnParams *params)
+{
+  const char *user = (params->username && params->username[0]) ? params->username : "";
+  const char *pass = params->password ? params->password : "";
+
+  SeerStatus st = o8i_login_call(conn, TTI_SESS, user, 1, NULL);
+  if (st != SEER_OK)
+    return st;
+  uint8_t *resp = NULL;
+  size_t rlen = 0;
+  st = seer_ttc_recv(conn, &resp, &rlen);
+  if (st != SEER_OK)
+    return st;
+  char *skhex = NULL;
+  st = seer_o8i_auth_value(resp, rlen, "AUTH_SESSKEY", &skhex);
+  int64_t code = o8i_status_code(resp, rlen);
+  free(resp);
+  if (st != SEER_OK || skhex == NULL) {
+    free(skhex);
+    seer_log(SEER_LOG_ERROR, "o8i: no AUTH_SESSKEY in the OSESSKEY reply (ORA-%05ld)", (long)code);
+    return code ? SEER_EAUTH : SEER_EPROTO;
+  }
+  uint8_t *sesskey = NULL;
+  size_t skl = 0;
+  st = hex_decode((const uint8_t *)skhex, strlen(skhex), &sesskey, &skl);
+  free(skhex);
+  if (st != SEER_OK)
+    return st;
+
+  uint8_t verifier[8];
+  seer_des_verifier(user, pass, verifier);
+  uint8_t *authpass = NULL;
+  size_t apn = 0;
+  st = seer_o3logon(sesskey, skl, verifier, pass, &authpass, &apn);
+  free(sesskey);
+  if (st != SEER_OK)
+    return st;
+  char *hexpw = hex_upper(authpass, apn);
+  free(authpass);
+  if (hexpw == NULL)
+    return SEER_ENOMEM;
+  char pwdfield[300];
+  int pwn =
+      snprintf(pwdfield, sizeof pwdfield, "%s%u", hexpw, (unsigned)((8 - (strlen(pass) % 8)) % 8));
+  free(hexpw);
+  if (pwn < 0 || (size_t)pwn >= sizeof pwdfield)
+    return SEER_EPROTO;
+
+  st = o8i_login_call(conn, TTI_AUTH, user, 0x101, pwdfield);
+  if (st != SEER_OK)
+    return st;
+  st = seer_ttc_recv(conn, &resp, &rlen);
+  if (st != SEER_OK)
+    return st;
+  if (rlen < 1 || resp[0] != TTI_RPA) {
+    code = o8i_status_code(resp, rlen);
+    free(resp);
+    seer_log(SEER_LOG_ERROR, "o8i: authentication failed (ORA-%05ld)", (long)code);
+    return SEER_EAUTH;
+  }
+  char *ver = NULL;
+  if (seer_o8i_auth_value(resp, rlen, "AUTH_VERSION_NO", &ver) == SEER_OK && ver != NULL)
+    conn->server_release = (uint32_t)strtoul(ver, NULL, 10);
+  free(ver);
+  free(resp);
+  conn->authenticated = true;
+  seer_log(SEER_LOG_INFO, "TTC: authenticated (O3LOGON / 8i, release %u.%u.%u)",
+           conn->server_release >> 24, conn->server_release >> 20 & 0x0F,
+           conn->server_release >> 12 & 0xFF);
   return SEER_OK;
 }
 
@@ -1633,11 +2033,15 @@ SeerStatus seer_request_end(SeerConn *conn)
 
 SeerStatus seer_commit(SeerConn *conn)
 {
+  if (conn != NULL && conn->is_8i)
+    return SEER_ENOTIMPL; /* 8i has no TTI_COMMIT: COMMIT rides its OALL8 */
   return seer_ttc_tran(conn, TTI_COMMIT);
 }
 
 SeerStatus seer_rollback(SeerConn *conn)
 {
+  if (conn != NULL && conn->is_8i)
+    return SEER_ENOTIMPL; /* likewise ROLLBACK */
   return seer_ttc_tran(conn, TTI_ROLLBACK);
 }
 

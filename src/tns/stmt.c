@@ -5427,6 +5427,13 @@ SeerStatus seer_stmt_execute(SeerStmt *stmt)
     return SEER_EPARAM;
   if (!stmt->conn->authenticated)
     return SEER_EPROTO;
+  if (stmt->conn->is_8i) {
+    /* Oracle 8i logs in, but its statement dialect (a 9.2-era OALL8, a
+     * fixed-width describe, 4-byte cell trailers; seerdb §19.9-19.17) is not
+     * spoken yet: refuse rather than send 9i's ALL7, which 8i never answers. */
+    seer_log(SEER_LOG_ERROR, "stmt: Oracle 8i statements are not supported yet");
+    return SEER_ENOTIMPL;
+  }
 
   /* Oracle 9i (fv2) speaks the TTI_ALL7 dialect, not TTI_ALL8: SELECT is a
    * four-call fetch sequence, DML/DDL a single parse-execute. PL/SQL blocks are

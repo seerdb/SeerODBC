@@ -25,6 +25,7 @@ struct SeerConn {
   uint8_t seq;           /* TTC sequence number, 1..127 (wrapping) */
   uint8_t field_version; /* negotiated TTC field version (from PRO) */
   bool authenticated;    /* O5LOGON completed                      */
+  bool is_8i;            /* Oracle 8i (8.1.x): its own login + statement dialect */
   bool autocommit;       /* commit each statement (default true)    */
   bool lob_inline;       /* fetch CLOB / BLOB columns inline (SeerConnParams) */
   /* Request boundaries (§35): server support (from PRO caps), the one-shot
@@ -109,6 +110,13 @@ SeerStatus seer_test_build_fetch_only(uint8_t fv, uint32_t release, uint8_t seq,
 /* Test-only: decode a 9i (fv2) DML/DDL status reply into its affected-row count
  * and ORA code (defined in stmt.c). Backs the fv2 status regression test. */
 void seer_test_fv2_decode_dml(const uint8_t *buf, size_t len, int64_t *rowcount, int64_t *code);
+
+/* Oracle 8i login (defined in ttc.c): build an OSESSKEY / OAUTH call at 8i's
+ * fixed little-endian widths, and read one value of its reply. */
+SeerStatus seer_o8i_build_login(SeerConn *conn, SeerWriter *w, uint8_t op, const char *user,
+                                uint32_t mode, const char *password_field, const char *host,
+                                const char *pid);
+SeerStatus seer_o8i_auth_value(const uint8_t *b, size_t n, const char *key, char **val);
 
 /* Test-only: gather a LOBOPS reply's TTI_LOB content (defined in lob.c);
  * SEER_EPROTO when it runs past the end of the reply. */

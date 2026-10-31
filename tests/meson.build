@@ -98,6 +98,14 @@ test_fv2_status = executable('test_fv2_status',
 )
 test('fv2 dml status', test_fv2_status)
 
+# Oracle 8i login: OSESSKEY / OAUTH at 8i's fixed little-endian widths, byte for
+# byte against seerdb's encoders, and reading the pairs reply.
+test_o8i_login = executable('test_o8i_login',
+  'unit/test_o8i_login.c',
+  dependencies : [seertns_dep],
+)
+test('8i login', test_o8i_login)
+
 # A LOBOPS reply's content, whole or cut short (a short chunk is an error, not
 # a silently truncated LOB).
 test_lob_content = executable('test_lob_content',
