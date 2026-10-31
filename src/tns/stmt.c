@@ -3280,6 +3280,12 @@ static void free_pending_objs(SeerStmt *stmt)
  * column - not a nested object to splice (XMLTYPE has no attributes of its
  * own, so splicing it dropped a slot and shifted every later attribute). */
 #define OBJ_ATTR_XMLTYPE 0xF0
+/* Pseudo type: a national (NCHAR / NVARCHAR2) attribute or collection element.
+ * Its image field carries AL16UTF16 (UTF-16BE), as a national column does,
+ * where every other char field carries the session's AL32UTF8 (seerdb
+ * PROTOCOL.md §21, #1433). The type name cannot tell it - 10g lists an
+ * NVARCHAR2 attribute as VARCHAR2 - so it comes from CHARACTER_SET_NAME. */
+#define OBJ_ATTR_NCHAR 0xF1
 
 /* A type declared inside a PL/SQL package is named PKG.TYPE here; its metadata
  * lives in ALL_PLSQL_TYPES / _TYPE_ATTRS / _COLL_TYPES, keyed by the package as
@@ -3355,6 +3361,32 @@ static uint8_t obj_type_to_ora(const char *tn)
   return ORA_TYPE_VARCHAR; /* VARCHAR2/NVARCHAR2/... */
 }
 
+/* An attribute's (or element's) layout type from the dictionary's type name and
+ * CHARACTER_SET_NAME: a char type whose set is NCHAR_CS is national. */
+static uint8_t obj_attr_type(const char *tn, const char *csname)
+{
+  uint8_t t = obj_type_to_ora(tn);
+  if ((t == ORA_TYPE_VARCHAR || t == ORA_TYPE_CHAR) && csname != NULL &&
+      strcmp(csname, "NCHAR_CS") == 0)
+    return OBJ_ATTR_NCHAR;
+  return t;
+}
+
+/* Decode one scalar image field by its layout type; a national field is
+ * UTF-16BE on the wire and comes back as UTF-8 text. */
+static SeerStatus decode_image_scalar(uint8_t type, const uint8_t *val, size_t vlen, SeerCell *cell)
+{
+  if (type != OBJ_ATTR_NCHAR)
+    return decode_scalar(type, val, vlen, cell);
+  char *u8 = NULL;
+  size_t u8len = 0;
+  if (seer_iconv("UTF-16BE", "UTF-8", (const char *)val, vlen, &u8, &u8len) != 0)
+    return SEER_EPROTO;
+  SeerStatus st = cell_set_bytes(cell, u8, u8len, false);
+  free(u8);
+  return st;
+}
+
 /* Read one length prefix inside an object image: -1 for a NULL attribute (0xFF),
  * -2 on a short/overrun read, otherwise the byte length (0xFE => a 4-byte
  * big-endian length follows). Advances *pos. */
@@ -3417,16 +3449,17 @@ static uint8_t coll_elem_wire_type(SeerConn *conn, const char *owner, const char
   uint8_t et = 0;
   SeerStmt *q = NULL;
   if (type_dict_query(conn,
-                      "SELECT elem_type_name FROM all_coll_types "
+                      "SELECT elem_type_name, character_set_name FROM all_coll_types "
                       "WHERE owner = :1 AND type_name = :2",
-                      "SELECT elem_type_name FROM all_plsql_coll_types "
+                      "SELECT elem_type_name, character_set_name FROM all_plsql_coll_types "
                       "WHERE owner = :1 AND package_name = :2 AND type_name = :3",
                       owner, name, &q) == SEER_OK &&
       seer_stmt_fetch(q) == SEER_OK) {
-    const char *en = NULL;
-    int isn = 0;
+    const char *en = NULL, *cs = NULL;
+    int isn = 0, isn_cs = 0;
     seer_stmt_get_string(q, 0, &en, &isn);
-    et = obj_type_to_ora(en); /* non-zero (defaults VARCHAR) */
+    seer_stmt_get_string(q, 1, &cs, &isn_cs);
+    et = obj_attr_type(en, isn_cs ? NULL : cs); /* non-zero (defaults VARCHAR) */
   }
   seer_stmt_close(q);
   return et;
@@ -3446,11 +3479,11 @@ static void build_obj_layout(SeerConn *conn, const char *owner, const char *name
    * (attr_type_package), which goes back on as PKG.TYPE. */
   SeerStmt *q = NULL;
   if (type_dict_query(conn,
-                      "SELECT attr_type_owner, NULL, attr_type_name FROM all_type_attrs "
-                      "WHERE owner = :1 AND type_name = :2 ORDER BY attr_no",
-                      "SELECT attr_type_owner, attr_type_package, attr_type_name "
-                      "FROM all_plsql_type_attrs WHERE owner = :1 AND package_name = :2 "
-                      "AND type_name = :3 ORDER BY attr_no",
+                      "SELECT attr_type_owner, NULL, attr_type_name, character_set_name "
+                      "FROM all_type_attrs WHERE owner = :1 AND type_name = :2 ORDER BY attr_no",
+                      "SELECT attr_type_owner, attr_type_package, attr_type_name, "
+                      "character_set_name FROM all_plsql_type_attrs WHERE owner = :1 "
+                      "AND package_name = :2 AND type_name = :3 ORDER BY attr_no",
                       owner, name, &q) == SEER_OK) {
     while (seer_stmt_fetch(q) == SEER_OK) {
       const char *aowner = NULL, *apkg = NULL, *atype = NULL;
@@ -3481,8 +3514,12 @@ static void build_obj_layout(SeerConn *conn, const char *owner, const char *name
         }
         free(ow);
         free(nm);
-      } else if (!append_attr(types, elem, n, cap, obj_type_to_ora(atype), 0)) {
-        break;
+      } else {
+        const char *acs = NULL;
+        int isn_cs = 0;
+        seer_stmt_get_string(q, 3, &acs, &isn_cs);
+        if (!append_attr(types, elem, n, cap, obj_attr_type(atype, isn_cs ? NULL : acs), 0))
+          break;
       }
     }
   }
@@ -3503,18 +3540,20 @@ static void fetch_obj_layout(SeerConn *conn, SeerColumn *col)
    * attribute layout so decode_collection_image can decode object elements. */
   SeerStmt *q = NULL;
   if (type_dict_query(conn,
-                      "SELECT elem_type_owner, NULL, elem_type_name FROM all_coll_types "
-                      "WHERE owner = :1 AND type_name = :2",
-                      "SELECT elem_type_owner, elem_type_package, elem_type_name "
-                      "FROM all_plsql_coll_types WHERE owner = :1 AND package_name = :2 "
-                      "AND type_name = :3",
+                      "SELECT elem_type_owner, NULL, elem_type_name, character_set_name "
+                      "FROM all_coll_types WHERE owner = :1 AND type_name = :2",
+                      "SELECT elem_type_owner, elem_type_package, elem_type_name, "
+                      "character_set_name FROM all_plsql_coll_types WHERE owner = :1 "
+                      "AND package_name = :2 AND type_name = :3",
                       col->type_schema, col->type_name, &q) == SEER_OK) {
     if (seer_stmt_fetch(q) == SEER_OK) {
-      const char *eowner = NULL, *epkg = NULL, *et = NULL;
-      int isn_owner = 0, isn_pkg = 0, isn = 0;
+      const char *eowner = NULL, *epkg = NULL, *et = NULL, *ecs = NULL;
+      int isn_owner = 0, isn_pkg = 0, isn = 0, isn_cs = 0;
       seer_stmt_get_string(q, 0, &eowner, &isn_owner);
       seer_stmt_get_string(q, 1, &epkg, &isn_pkg);
       seer_stmt_get_string(q, 2, &et, &isn);
+      seer_stmt_get_string(q, 3, &ecs, &isn_cs);
+      bool national = !isn_cs && ecs != NULL && strcmp(ecs, "NCHAR_CS") == 0;
       col->is_collection = true;
       char *eo = (!isn_owner && eowner && eowner[0]) ? strdup(eowner) : NULL;
       char *en = NULL;
@@ -3535,7 +3574,7 @@ static void fetch_obj_layout(SeerConn *conn, SeerColumn *col)
         col->n_elem_obj_attrs = n;
         col->element_type = ORA_TYPE_ADT;
       } else {
-        col->element_type = obj_type_to_ora(en);
+        col->element_type = obj_attr_type(en, national ? "NCHAR_CS" : NULL);
       }
       free(eo);
       free(en);
@@ -3655,7 +3694,7 @@ static SeerStatus decode_object_image(SeerConn *conn, const uint8_t *img, size_t
       cell_set_text(&tmp, strdup(nb));
       ast = SEER_OK;
     } else
-      ast = decode_scalar(types[a], img + pos, (size_t)len, &tmp);
+      ast = decode_image_scalar(types[a], img + pos, (size_t)len, &tmp);
     if (ast == SEER_OK && tmp.data != NULL)
       seer_writer_bytes(&w, tmp.data, tmp.len);
     free(tmp.data);
@@ -3729,7 +3768,7 @@ static SeerStatus decode_collection_image(const uint8_t *img, size_t imglen, uin
     SeerStatus est = (n_elem_obj_attrs > 0) /* element is an object image */
                          ? decode_object_image(NULL, img + pos, (size_t)len, elem_obj_types, NULL,
                                                n_elem_obj_attrs, &tmp)
-                         : decode_scalar(element_type, img + pos, (size_t)len, &tmp);
+                         : decode_image_scalar(element_type, img + pos, (size_t)len, &tmp);
     if (est == SEER_OK && tmp.data != NULL) {
       if (n_elem_obj_attrs > 0)
         seer_writer_u8(&w, '('); /* nest object as (a, b) */
@@ -5823,16 +5862,18 @@ static SeerStatus obj_lookup_elem(SeerConn *conn, const char *schema, const char
   bool got = false;
   *index_table = false;
   if (type_dict_query(conn,
-                      "SELECT elem_type_name, coll_type FROM all_coll_types "
+                      "SELECT elem_type_name, coll_type, character_set_name FROM all_coll_types "
                       "WHERE owner = :1 AND type_name = :2",
-                      "SELECT elem_type_name, coll_type FROM all_plsql_coll_types "
+                      "SELECT elem_type_name, coll_type, character_set_name "
+                      "FROM all_plsql_coll_types "
                       "WHERE owner = :1 AND package_name = :2 AND type_name = :3",
                       schema, name, &q) == SEER_OK &&
       seer_stmt_fetch(q) == SEER_OK) {
-    const char *tn = NULL, *kind = NULL;
-    int isnull = 0;
+    const char *tn = NULL, *kind = NULL, *cs = NULL;
+    int isnull = 0, isn_cs = 0;
     seer_stmt_get_string(q, 0, &tn, &isnull);
-    *elem_type = obj_type_to_ora(tn);
+    seer_stmt_get_string(q, 2, &cs, &isn_cs);
+    *elem_type = obj_attr_type(tn, isn_cs ? NULL : cs);
     seer_stmt_get_string(q, 1, &kind, &isnull);
     *index_table = !isnull && kind != NULL && strcmp(kind, "PL/SQL INDEX TABLE") == 0;
     got = true;
@@ -5902,6 +5943,17 @@ static void obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val
       obj_write_length(body, 7);
       seer_writer_bytes(body, dt, 7);
     }
+  } else if (ora_type == OBJ_ATTR_NCHAR) { /* national: AL16UTF16 (UTF-16BE) */
+    char *u16 = NULL;
+    size_t u16len = 0;
+    size_t vl = strlen(val);
+    if (vl > 0 && seer_iconv("UTF-8", "UTF-16BE", val, vl, &u16, &u16len) != 0) {
+      seer_writer_u8(body, 0xFF); /* not valid UTF-8: send NULL, never mojibake */
+      return;
+    }
+    obj_write_length(body, (uint32_t)u16len);
+    seer_writer_bytes(body, (const uint8_t *)u16, u16len);
+    free(u16);
   } else { /* char (and best-effort default): UTF-8 */
     size_t vl = strlen(val);
     obj_write_length(body, (uint32_t)vl);
