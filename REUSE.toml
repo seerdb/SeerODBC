@@ -33,3 +33,11 @@ path = "tests/fixtures/ano_server_response.bin"
 precedence = "aggregate"
 SPDX-FileCopyrightText = "© 2026 Peter Lemenkov and the SeerODBC contributors"
 SPDX-License-Identifier = "Apache-2.0"
+
+# Release notes: each file is published verbatim as a GitHub Release body
+# (release.yml --notes-file), so an inline SPDX comment would land in it.
+[[annotations]]
+path = "docs/releases/*.md"
+precedence = "aggregate"
+SPDX-FileCopyrightText = "© 2026 Peter Lemenkov and the SeerODBC contributors"
+SPDX-License-Identifier = "Apache-2.0"

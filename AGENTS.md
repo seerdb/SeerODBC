@@ -32,9 +32,11 @@ never to merge or tag it. The steps:
    `AUTH_PROGRAM_NM` with no version — so a stale macro is a cosmetic bug, not a
    protocol one. Keep them in sync anyway; a consumer may read them.
 
-3. **Write the release notes.** SeerODBC keeps its notes in the GitHub Release
-   body (there is no in-tree `CHANGELOG` yet — adopt one here if the project
-   grows to want it). Cover what changed since the last tag
+3. **Write the release notes** as `docs/releases/x.y.z.md` (start from
+   [`docs/releases/TEMPLATE.md`](docs/releases/TEMPLATE.md)) and commit them
+   in the release PR. `release.yml` publishes that file as the GitHub Release
+   body, above GitHub's auto-generated PR list, and refuses to release a tag
+   that has none. Cover what changed since the last tag
    (`git log <last-tag>..master`, or the full history for the first release),
    skipping dependabot / pure-CI noise. Bold the headline phrase of each entry
    and cite the issue/PR as `(#NNN)`. State validation status **honestly**:
