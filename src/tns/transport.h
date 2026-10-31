@@ -19,11 +19,17 @@
 typedef struct SeerTransport SeerTransport;
 
 /* Connect to host:port. `timeout_ms` bounds the connect attempt (<=0 picks a
- * default); it also seeds the per-read/write socket timeout. */
+ * default); it also seeds the per-read/write socket timeout, which bounds the
+ * login. Once logged in, lift it with seer_transport_set_io_timeout(t, 0): a
+ * call may legitimately run longer (a long query, a lock wait). */
 SeerStatus seer_transport_connect(const char *host, uint16_t port, int timeout_ms,
                                   SeerTransport **out);
 
 void seer_transport_close(SeerTransport *t);
+
+/* Re-arm the per-read/write socket timeout: 0 means none (block until the
+ * server answers), a negative value the connect default. */
+void seer_transport_set_io_timeout(SeerTransport *t, int timeout_ms);
 
 /* Wrap an already-connected transport in TLS (TCPS): perform a client TLS
  * handshake, after which read/write transparently encrypt. `sni_host` is the

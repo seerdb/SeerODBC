@@ -92,6 +92,15 @@ int seer_transport_large_frames(const SeerTransport *t)
   return t != NULL && t->large_frames;
 }
 
+void seer_transport_set_io_timeout(SeerTransport *t, int timeout_ms)
+{
+  if (t == NULL)
+    return;
+  if (timeout_ms < 0)
+    timeout_ms = DEFAULT_TIMEOUT_MS;
+  seer_sock_set_io_timeout(t->fd, timeout_ms);
+}
+
 int seer_transport_wait_readable(SeerTransport *t, int timeout_ms)
 {
   if (t == NULL)
