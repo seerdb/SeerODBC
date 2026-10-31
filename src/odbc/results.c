@@ -106,6 +106,12 @@ static SQLLEN display_size_of(int ora_type, int max_size)
   case ORA_TYPE_TIMESTAMPTZ:
   case ORA_TYPE_TIMESTAMPLTZ:
     return 29;
+  case ORA_TYPE_RID:
+  case ORA_TYPE_ROWID:
+    /* The rowid's 18-character text. 8i and 9i describe a ROWID with a 1-byte
+     * buffer, and a column size of 1 had applications cut it to its first
+     * characters (isql showed "AAAAD"). */
+    return 18;
   default:
     return max_size > 0 ? max_size : 4000;
   }
