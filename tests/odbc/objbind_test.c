@@ -199,6 +199,55 @@ int main(void)
   run(c, "DROP TABLE seerva_t");
   run(c, "DROP TYPE seerva_o");
 
+  /* --- national (NVARCHAR2 / NCHAR) attributes and elements --- the image
+   * carries them in AL16UTF16; written as UTF-8 the server would store other
+   * characters (only LENGTH / LENGTHB on the server shows it). */
+  run(c, "DROP TABLE seernc_t");
+  run(c, "DROP TYPE seernc_o");
+  run(c, "DROP TYPE seernc_v");
+  run(c, "CREATE TYPE seernc_o AS OBJECT (a NVARCHAR2(20), b VARCHAR2(20))");
+  run(c, "CREATE TYPE seernc_v AS VARRAY(5) OF NVARCHAR2(20)");
+  run(c, "CREATE TABLE seernc_t (o seernc_o, l seernc_v)");
+  {
+    const char *name = "NVARCHAR2 object attribute + element bind";
+    /* "žába 猫" and "猫" */
+    const char *attrs[2] = {"\xc5\xbe\xc3\xa1"
+                            "ba \xe7\x8c\xab",
+                            "plain"};
+    const char *elems[2] = {"\xe7\x8c\xab", "abc"};
+    SeerStmt *ins = NULL;
+    seer_stmt_prepare(c, "INSERT INTO seernc_t VALUES (:1, :2)", &ins);
+    SeerStatus st = seer_stmt_bind_object(ins, 1, schema, "SEERNC_O", attrs, 2);
+    if (st == SEER_OK)
+      st = seer_stmt_bind_collection(ins, 2, schema, "SEERNC_V", elems, 2);
+    if (st == SEER_ENOTIMPL) {
+      skip(name, "object bind requires a 12c+ server");
+    } else if (st != SEER_OK || seer_stmt_execute(ins) != SEER_OK) {
+      fail(name, seer_last_error(c) ? seer_last_error(c) : "bind/insert");
+    } else {
+      seer_stmt_close(ins);
+      ins = NULL;
+      seer_commit(c);
+      /* Server side: 6 characters in 12 AL16UTF16 bytes; elements 1/2, 3/6. */
+      int lens = readback_has(c,
+                              "SELECT LENGTH(t.o.a) || '/' || LENGTHB(t.o.a) || ' ' || "
+                              "(SELECT LISTAGG(LENGTH(column_value) || '/' || "
+                              "LENGTHB(column_value), ',') WITHIN GROUP (ORDER BY 1) "
+                              "FROM TABLE(t.l)) FROM seernc_t t",
+                              "6/12 ", "1/2,3/6");
+      int text = readback_has(c, "SELECT o FROM seernc_t", attrs[0], "plain") &&
+                 readback_has(c, "SELECT l FROM seernc_t", elems[0], "abc");
+      if (lens && text)
+        pass(name);
+      else
+        fail(name, lens ? "read-back text" : "server-side LENGTH/LENGTHB");
+    }
+    seer_stmt_close(ins);
+  }
+  run(c, "DROP TABLE seernc_t");
+  run(c, "DROP TYPE seernc_o");
+  run(c, "DROP TYPE seernc_v");
+
   /* --- nested object bind (an attribute that is itself an ADT, flattened) --- */
   run(c, "DROP TABLE seerpe_t");
   run(c, "DROP TYPE seerpe_o");

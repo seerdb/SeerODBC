@@ -909,6 +909,47 @@ static void check_json_server_forms(SQLHDBC dbc)
 /* Object with an XMLType attribute between two NUMBERs: the XMLType is its own
  * image (decoded like an XMLType column), and the attribute after it must not
  * shift into its place. */
+/* NVARCHAR2 / NCHAR attributes and collection elements are AL16UTF16 in the
+ * image, as a national column is; decoded as AL32UTF8 they came back as raw
+ * UTF-16 bytes. 10g's dictionary names the type VARCHAR2, so the driver goes
+ * by CHARACTER_SET_NAME. */
+static void check_object_national_attrs(SQLHDBC dbc)
+{
+  const char *name = "SQL OBJECT / VARRAY with NVARCHAR2 attributes";
+  char err[256] = "", obj[256] = "", coll[256] = "";
+  exec_do(dbc, "DROP TABLE seer_nat", err, sizeof err);
+  exec_do(dbc, "DROP TYPE seer_no", err, sizeof err);
+  exec_do(dbc, "DROP TYPE seer_nv", err, sizeof err);
+  if (!SQL_SUCCEEDED(exec_do(dbc, "CREATE TYPE seer_no AS OBJECT (a NVARCHAR2(20), b VARCHAR2(20))",
+                             err, sizeof err))) {
+    skip(name, err[0] ? err : "create type failed");
+    return;
+  }
+  exec_do(dbc, "CREATE TYPE seer_nv AS VARRAY(5) OF NVARCHAR2(20)", err, sizeof err);
+  exec_do(dbc, "CREATE TABLE seer_nat (o seer_no, l seer_nv)", err, sizeof err);
+  exec_do(dbc,
+          "INSERT INTO seer_nat VALUES (seer_no(UNISTR('\\017e\\00e1ba \\732b'), 'plain'), "
+          "seer_nv(UNISTR('\\732b'), UNISTR('abc')))",
+          err, sizeof err);
+  SQLRETURN rc = exec_scalar(dbc, "SELECT o FROM seer_nat", obj, sizeof obj, err, sizeof err);
+  if (SQL_SUCCEEDED(rc))
+    rc = exec_scalar(dbc, "SELECT l FROM seer_nat", coll, sizeof coll, err, sizeof err);
+  exec_do(dbc, "DROP TABLE seer_nat", err, sizeof err);
+  exec_do(dbc, "DROP TYPE seer_no", err, sizeof err);
+  exec_do(dbc, "DROP TYPE seer_nv", err, sizeof err);
+  /* "\xc5\xbe\xc3\xa1ba \xe7\x8c\xab" is "žába 猫" in UTF-8 */
+  if (SQL_SUCCEEDED(rc) &&
+      strcmp(obj, "\xc5\xbe\xc3\xa1"
+                  "ba \xe7\x8c\xab, plain") == 0 &&
+      strcmp(coll, "[\xe7\x8c\xab, abc]") == 0)
+    pass(name);
+  else {
+    char m[600];
+    snprintf(m, sizeof m, "got '%s' / '%s' %s", obj, coll, err);
+    fail(name, m);
+  }
+}
+
 static void check_object_xmltype_attr(SQLHDBC dbc)
 {
   const char *name = "SQL OBJECT with an XMLType attribute";
@@ -2920,6 +2961,7 @@ int main(void)
   check_large_fetch(dbc);
   check_object(dbc);
   check_object_xmltype_attr(dbc);
+  check_object_national_attrs(dbc);
   check_object_lob_attrs(dbc);
   check_collection_of_objects(dbc);
   check_object_with_collection(dbc);
