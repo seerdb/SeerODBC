@@ -1667,6 +1667,86 @@ static void check_annotations(SQLHDBC dbc)
 /* 12c+ implicit result sets (DBMS_SQL.RETURN_RESULT), surfaced through
  * SQLMoreResults: an anonymous block returns a cursor; each SQLMoreResults makes
  * the next implicit result current. Skipped on pre-12c servers (no RETURN_RESULT). */
+/* A REF CURSOR (or implicit result) whose rows carry a CURSOR() column. The
+ * driver has no SQL for such a cursor and must fetch it with a fetch-only
+ * OALL8 on its id: 10g..21c answer a plain TTI_FETCH with each inner cursor
+ * cell cut to `02 <ub4 id>` (no inline describe), which desyncs the row
+ * (seerdb#1462). The nested column reads as NULL; the columns around it must
+ * still decode. */
+#define SEER_SQL_REFCURSOR (-9999) /* driver extension SQL type */
+static int rows_around_cursor(SQLHSTMT st, int want_rows, char *why, size_t whyn)
+{
+  int rows = 0;
+  SQLRETURN rc;
+  while (SQL_SUCCEEDED(rc = SQLFetch(st))) {
+    char a[16] = "", t[16] = "";
+    SQLLEN ia = 0, it = 0;
+    SQLGetData(st, 1, SQL_C_CHAR, a, sizeof a, &ia);
+    SQLGetData(st, 3, SQL_C_CHAR, t, sizeof t, &it);
+    rows++;
+    if (atoi(a) != rows || strcmp(t, "tail") != 0) {
+      snprintf(why, whyn, "row %d: a='%s' tail='%s'", rows, a, t);
+      return 0;
+    }
+  }
+  if (rc != SQL_NO_DATA) {
+    diag_text(SQL_HANDLE_STMT, st, why, (int)whyn);
+    return 0;
+  }
+  if (rows != want_rows) {
+    snprintf(why, whyn, "rows=%d want %d", rows, want_rows);
+    return 0;
+  }
+  return 1;
+}
+
+static void check_refcursor_nested_cursor(SQLHDBC dbc)
+{
+  /* Opened from a string: 11g's PL/SQL compiler refuses a cursor expression
+   * in a static OPEN ... FOR (PLS-00103 / ORA-06550). */
+  const char *query = "'SELECT level a, CURSOR(SELECT 1 FROM dual) c, ''tail'' t "
+                      "FROM dual CONNECT BY level <= 30'";
+  char why[300] = "", blk[512];
+  {
+    const char *name = "REF CURSOR rows holding a CURSOR() column";
+    SQLHSTMT st;
+    SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+    snprintf(blk, sizeof blk, "BEGIN OPEN :1 FOR %s; END;", query);
+    SQLRETURN rc = SQLBindParameter(st, 1, SQL_PARAM_OUTPUT, SQL_C_DEFAULT, SEER_SQL_REFCURSOR, 0,
+                                    0, NULL, 0, NULL);
+    if (SQL_SUCCEEDED(rc))
+      rc = SQLExecDirect(st, (SQLCHAR *)blk, SQL_NTS);
+    if (!SQL_SUCCEEDED(rc))
+      diag_text(SQL_HANDLE_STMT, st, why, sizeof why);
+    if (SQL_SUCCEEDED(rc) && rows_around_cursor(st, 30, why, sizeof why))
+      pass(name);
+    else
+      fail(name, why);
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+  }
+  if (!server_is_12c(dbc))
+    return; /* no DBMS_SQL.RETURN_RESULT */
+  {
+    const char *name = "implicit result rows holding a CURSOR() column";
+    SQLHSTMT st;
+    SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+    snprintf(blk, sizeof blk,
+             "DECLARE c SYS_REFCURSOR; BEGIN OPEN c FOR %s; DBMS_SQL.RETURN_RESULT(c); END;",
+             query);
+    why[0] = '\0';
+    SQLRETURN rc = SQLExecDirect(st, (SQLCHAR *)blk, SQL_NTS);
+    if (SQL_SUCCEEDED(rc))
+      rc = SQLMoreResults(st);
+    if (!SQL_SUCCEEDED(rc))
+      diag_text(SQL_HANDLE_STMT, st, why, sizeof why);
+    if (SQL_SUCCEEDED(rc) && rows_around_cursor(st, 30, why, sizeof why))
+      pass(name);
+    else
+      fail(name, why[0] ? why : "no implicit result");
+    SQLFreeHandle(SQL_HANDLE_STMT, st);
+  }
+}
+
 static void check_implicit_results(SQLHDBC dbc)
 {
   const char *name = "implicit results";
@@ -3008,6 +3088,7 @@ int main(void)
   check_bulk_unsupported(dbc);
   check_annotations(dbc);
   check_implicit_results(dbc);
+  check_refcursor_nested_cursor(dbc);
   check_array_dml_rowcounts(dbc);
   check_browse_connect(browse_dir, user, pwd);
   check_proxy_auth(dbc, drv, host, port, svc);
