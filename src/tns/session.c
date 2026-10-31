@@ -47,6 +47,8 @@
  * The 319 body is the legacy 50 bytes plus a 16-byte trailer (large SDU/TDU +
  * two connect-flag words) that sits before the connect descriptor (#155). */
 #define TNS_CONNECT_DATA_OFF 74
+/* The most connect data a server reads from the CONNECT packet itself. */
+#define TNS_MAX_CONNECT_DATA 230
 /* ANO-capable (§33.1). The legacy 0x8484 ("disabled") makes an ANO server RESET
  * after negotiation round 1; advertising 0x0101 commits us to running the ANO
  * negotiation (gated on the accept's ACFL flags) before PRO. */
@@ -126,6 +128,34 @@ static SeerStatus build_connect_body(const SeerConnParams *p, SeerWriter *w)
     return SEER_ENOMEM;
   }
   return SEER_OK;
+}
+
+/* Send the CONNECT. A server reads at most TNS_MAX_CONNECT_DATA bytes of
+ * connect data from the CONNECT packet itself; given more, it waits for data
+ * that never comes and the connect hangs (10g..23ai alike). A longer
+ * descriptor goes in a DATA packet (data flags 0) straight after the CONNECT,
+ * which keeps its stated length and offset but ends where the descriptor
+ * would start - as the reference client does (seerdb#1768). Nothing is
+ * negotiated yet, so both go in the legacy 16-bit envelope. */
+static SeerStatus send_connect(SeerTransport *t, const SeerWriter *body)
+{
+  const size_t head = TNS_CONNECT_DATA_OFF - TNS_HEADER_LEN;
+  if (body->len - head <= TNS_MAX_CONNECT_DATA)
+    return seer_packet_send(t, TNS_PT_CONNECT, body->buf, body->len);
+
+  SeerStatus st = seer_packet_send(t, TNS_PT_CONNECT, body->buf, head);
+  if (st != SEER_OK)
+    return st;
+  size_t dlen = body->len - head;
+  uint8_t *data = malloc(2 + dlen);
+  if (data == NULL)
+    return SEER_ENOMEM;
+  data[0] = 0x00; /* data flags */
+  data[1] = 0x00;
+  memcpy(data + 2, body->buf + head, dlen);
+  st = seer_packet_send(t, TNS_PT_DATA, data, 2 + dlen);
+  free(data);
+  return st;
 }
 
 /* Copy the value of `key` (e.g. "(HOST=") from `s` up to the next ')'. */
@@ -244,7 +274,7 @@ SeerStatus seer_connect(const SeerConnParams *params, SeerConn **out)
       }
     }
 
-    st = seer_packet_send(conn->t, TNS_PT_CONNECT, body.buf, body.len);
+    st = send_connect(conn->t, &body);
     if (st != SEER_OK)
       goto fail;
 
