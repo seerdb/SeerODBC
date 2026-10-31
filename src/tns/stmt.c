@@ -4012,6 +4012,10 @@ static void fv2_set_error(SeerConn *c, const uint8_t *resp, size_t rlen)
 }
 
 /* Append one fv2 define entry: the client's requested return type for a column. */
+/* The define sizes of a rowid fetched as text on 9i (fv2_define_entry). */
+#define FV2_MAX_ROWID_TEXT 128
+#define FV2_MAX_UROWID_TEXT 5267
+
 static void fv2_define_entry(SeerWriter *w, const SeerColumn *col)
 {
   uint8_t deftype = col->ora_type;
@@ -4033,6 +4037,17 @@ static void fv2_define_entry(SeerWriter *w, const SeerColumn *col)
   case ORA_TYPE_LONG:
   case ORA_TYPE_LONGRAW:
     maxsize = 0x7FFFFFFFu;
+    break;
+  case ORA_TYPE_RID:
+  case ORA_TYPE_ROWID:
+  case ORA_TYPE_UROWID:
+    /* A rowid is defined as its text, as JDBC does: the native ROWID return
+     * form desyncs the 9i row stream (ORA-01002). A physical ROWID is 18
+     * characters; a UROWID (an IOT's logical rowid) holds the table's key and
+     * runs to 5267, so it is defined at that or it comes back cut short
+     * (seerdb PROTOCOL.md §19.4, #2335). */
+    deftype = ORA_TYPE_VARCHAR;
+    maxsize = col->ora_type == ORA_TYPE_UROWID ? FV2_MAX_UROWID_TEXT : FV2_MAX_ROWID_TEXT;
     break;
   default:
     break;
@@ -4209,8 +4224,14 @@ static SeerStatus fv2_decode_rows(SeerStmt *stmt, const uint8_t *data, size_t dl
           r.pos += 2; /* 81 01 = NULL (leave cell zeroed) */
         } else {
           (void)seer_reader_u8(&r); /* present indicator (0x00) */
-          if (vlen > 0)
-            decode_scalar(stmt->cols[ci].ora_type, val, vlen, &row[ci]);
+          if (vlen > 0) {
+            /* A rowid column was defined as VARCHAR (fv2_define_entry): its
+             * value is the rowid's text, not the native form. */
+            uint8_t dt = (ct == ORA_TYPE_RID || ct == ORA_TYPE_ROWID || ct == ORA_TYPE_UROWID)
+                             ? ORA_TYPE_VARCHAR
+                             : ct;
+            decode_scalar(dt, val, vlen, &row[ci]);
+          }
         }
         free(val);
       }

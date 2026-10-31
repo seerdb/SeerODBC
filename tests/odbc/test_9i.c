@@ -607,6 +607,65 @@ static void check_rollback(void)
   }
 }
 
+/* A rowid column is defined as its text (the native form desyncs the 9i row
+ * stream, ORA-01002), and a UROWID at its full 5267 characters: an IOT's
+ * logical rowid holds the key, and a 900-character key gives a 1212-character
+ * rowid, which must come back whole and bind back to its row. */
+static void check_rowid(void)
+{
+  const char *name = "ROWID / UROWID fetched as text";
+  char rid[64] = "", tail[16] = "";
+  SeerStmt *s = NULL;
+  if (seer_stmt_prepare(C, "SELECT ROWID, 'tail' FROM dual", &s) == SEER_OK &&
+      seer_stmt_execute(s) == SEER_OK && seer_stmt_fetch(s) == SEER_OK) {
+    const char *v = NULL;
+    int n = 0;
+    if (seer_stmt_get_string(s, 0, &v, &n) == SEER_OK && v)
+      snprintf(rid, sizeof rid, "%s", v);
+    if (seer_stmt_get_string(s, 1, &v, &n) == SEER_OK && v)
+      snprintf(tail, sizeof tail, "%s", v);
+  }
+  seer_stmt_close(s);
+
+  run("DROP TABLE seer9iot");
+  run("CREATE TABLE seer9iot (k VARCHAR2(1000) PRIMARY KEY, v NUMBER) ORGANIZATION INDEX");
+  run("INSERT INTO seer9iot VALUES (RPAD('k', 900, 'x'), 7)");
+  char *urowid = NULL;
+  s = NULL;
+  if (seer_stmt_prepare(C, "SELECT ROWID FROM seer9iot", &s) == SEER_OK &&
+      seer_stmt_execute(s) == SEER_OK && seer_stmt_fetch(s) == SEER_OK) {
+    const char *v = NULL;
+    int n = 0;
+    if (seer_stmt_get_string(s, 0, &v, &n) == SEER_OK && v)
+      urowid = strdup(v);
+  }
+  seer_stmt_close(s);
+  char back[16] = "";
+  s = NULL;
+  if (urowid != NULL &&
+      seer_stmt_prepare(C, "SELECT v FROM seer9iot WHERE ROWID = :1", &s) == SEER_OK &&
+      seer_stmt_bind_text(s, 1, urowid, -1) == SEER_OK && seer_stmt_execute(s) == SEER_OK &&
+      seer_stmt_fetch(s) == SEER_OK) {
+    const char *v = NULL;
+    int n = 0;
+    if (seer_stmt_get_string(s, 0, &v, &n) == SEER_OK && v)
+      snprintf(back, sizeof back, "%s", v);
+  }
+  seer_stmt_close(s);
+  run("DROP TABLE seer9iot");
+
+  size_t ulen = urowid ? strlen(urowid) : 0;
+  free(urowid);
+  if (strlen(rid) == 18 && strcmp(tail, "tail") == 0 && ulen == 1212 && strcmp(back, "7") == 0)
+    pass(name);
+  else {
+    char m[128];
+    snprintf(m, sizeof m, "rowid='%s' tail='%s' urowid len=%zu bound back='%s'", rid, tail, ulen,
+             back);
+    fail(name, m);
+  }
+}
+
 int main(void)
 {
   const char *port = getenv("SEER_TEST_PORT");
@@ -635,6 +694,7 @@ int main(void)
   check_dml_binds();
   check_date_bind();
   check_raw_bind();
+  check_rowid();
   check_multibatch_fetch();
   check_error_recovery();
   check_rollback();
