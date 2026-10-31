@@ -199,6 +199,55 @@ int main(void)
   run(c, "DROP TABLE seerva_t");
   run(c, "DROP TYPE seerva_o");
 
+  /* --- temporal attributes --- each takes its type's width: a WITH TIME ZONE
+   * one is 13 bytes (UTC + offset), so "10:00 +02:00" must store 08:00 UTC
+   * with a +2 zone, not an 11-byte value the server reads as another; and a
+   * WITH TIME ZONE value that names no offset is refused, not guessed. */
+  run(c, "DROP TABLE seertz_t");
+  run(c, "DROP TYPE seertz_o");
+  run(c, "CREATE TYPE seertz_o AS OBJECT (ts TIMESTAMP, tz TIMESTAMP WITH TIME ZONE, "
+         "ltz TIMESTAMP WITH LOCAL TIME ZONE, d DATE)");
+  run(c, "CREATE TABLE seertz_t (o seertz_o)");
+  {
+    const char *name = "TIMESTAMP / WITH TIME ZONE / LTZ / DATE attribute bind";
+    const char *attrs[4] = {"2020-02-29 00:00:00", "2020-02-29 10:00:00.25 +02:00",
+                            "2020-02-29 10:00:00.5", "2020-02-29 12:34:56"};
+    SeerStmt *ins = NULL;
+    seer_stmt_prepare(c, "INSERT INTO seertz_t VALUES (:1)", &ins);
+    SeerStatus st = seer_stmt_bind_object(ins, 1, schema, "SEERTZ_O", attrs, 4);
+    if (st == SEER_ENOTIMPL) {
+      skip(name, "object bind requires a 12c+ server");
+    } else if (st != SEER_OK || seer_stmt_execute(ins) != SEER_OK) {
+      fail(name, seer_last_error(c) ? seer_last_error(c) : "bind/insert");
+    } else {
+      seer_stmt_close(ins);
+      ins = NULL;
+      seer_commit(c);
+      int ok = readback_has(c,
+                            "SELECT TO_CHAR(t.o.ts, 'YYYY-MM-DD HH24:MI:SS.FF3') || '|' || "
+                            "TO_CHAR(SYS_EXTRACT_UTC(t.o.tz), 'YYYY-MM-DD HH24:MI:SS.FF2') || '|' "
+                            "|| EXTRACT(TIMEZONE_HOUR FROM t.o.tz) || '|' || "
+                            "TO_CHAR(t.o.ltz, 'FF1') || '|' || "
+                            "TO_CHAR(t.o.d, 'YYYY-MM-DD HH24:MI:SS') FROM seertz_t t",
+                            "2020-02-29 00:00:00.000|2020-02-29 08:00:00.25|2|5|",
+                            "|2020-02-29 12:34:56");
+      /* no offset on the WITH TIME ZONE attribute: refused */
+      const char *nozone[4] = {"2020-02-29 00:00:00", "2020-02-29 10:00:00", "2020-02-29 10:00:00",
+                               "2020-02-29 12:34:56"};
+      SeerStmt *bad = NULL;
+      seer_stmt_prepare(c, "INSERT INTO seertz_t VALUES (:1)", &bad);
+      SeerStatus bst = seer_stmt_bind_object(bad, 1, schema, "SEERTZ_O", nozone, 4);
+      seer_stmt_close(bad);
+      if (ok && bst == SEER_EPARAM)
+        pass(name);
+      else
+        fail(name, !ok ? "server-side values" : "a zone-less WITH TIME ZONE value was accepted");
+    }
+    seer_stmt_close(ins);
+  }
+  run(c, "DROP TABLE seertz_t");
+  run(c, "DROP TYPE seertz_o");
+
   /* --- national (NVARCHAR2 / NCHAR) attributes and elements --- the image
    * carries them in AL16UTF16; written as UTF-8 the server would store other
    * characters (only LENGTH / LENGTHB on the server shows it). */
