@@ -67,16 +67,29 @@ jobs:
         # build/meson-dist/ (a .tar.xz plus its .sha256sum).
         run: meson dist -C build
 
+      - name: Check the curated release notes
+        # The Release body is the in-tree docs/releases/<tag>.md, written in the
+        # release PR (AGENTS.md step 3). Refuse to publish a release without it
+        # rather than fall back to the bare PR list.
+        run: |
+          notes="docs/releases/${GITHUB_REF_NAME}.md"
+          if [ ! -s "$notes" ]; then
+            echo "::error::missing release notes ${notes} (see AGENTS.md, Cutting a release)"
+            exit 1
+          fi
+
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # `--generate-notes` produces GitHub's standard auto-generated summary:
+          # The body is the curated notes file, then (`--generate-notes`, which
+          # gh appends after --notes-file) GitHub's standard auto-generated summary:
           # "What's Changed" (PRs since the previous tag), "New Contributors" and
           # a "Full Changelog" link — the same as the "Generate release notes"
           # button in the UI. `--verify-tag` refuses to release a nonexistent tag.
           gh release create "${GITHUB_REF_NAME}" \
             --title "SeerODBC ${GITHUB_REF_NAME}" \
+            --notes-file "docs/releases/${GITHUB_REF_NAME}.md" \
             --generate-notes \
             --verify-tag \
             build/meson-dist/*
