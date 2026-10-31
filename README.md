@@ -128,6 +128,12 @@ neutral and links against neither. The shim builds as `libseerodbc.dylib`, with
 symbol export handled by the linker's `-exported_symbols_list` (the macOS
 equivalent of the Linux version script).
 
+To install a release instead, use the Homebrew formula in
+[`packaging/homebrew/seerodbc.rb`](packaging/homebrew/seerodbc.rb) from a tap of
+your own (its header shows how); it installs `lib/odbc/libseerodbc.dylib` and a
+ready `odbcinst.ini.sample` that `brew info seerodbc` points at. CI builds,
+installs and tests the formula on every PR.
+
 ## License
 
 [Apache-2.0](LICENSE), chosen over MIT/BSD for its explicit patent grant. The
