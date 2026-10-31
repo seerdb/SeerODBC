@@ -2250,9 +2250,14 @@ SeerStatus seer_stmt_bind_timestamp(SeerStmt *stmt, int param, int year, int mon
       (uint8_t)(nanos >> 8),
       (uint8_t)nanos,
   };
+  /* A zero fraction goes out in the 7-byte DATE form under the same 11-byte
+   * TIMESTAMP descriptor, as the reference client sends it: the server does
+   * not read the two forms alike - `trunc(ltz_col) = :midnight` matches only
+   * the 7-byte one (seerdb PROTOCOL.md §11.4b, f26fd77). The descriptor stays
+   * TIMESTAMP / 11, so an array batch mixing the two forms keeps one type. */
   uint8_t *rxd = NULL;
   size_t rl = 0;
-  SeerStatus st = rxd_short(d, sizeof d, &rxd, &rl);
+  SeerStatus st = rxd_short(d, nanos == 0 ? 7 : sizeof d, &rxd, &rl);
   if (st != SEER_OK)
     return st;
   return store_bind(stmt, param, ORA_TYPE_TIMESTAMP, 11, 0, 0, false, rxd, rl);
