@@ -248,6 +248,58 @@ static void check_fetch_in_txn(SQLHDBC dbc)
 /* A column the server describes with data length 0 (a bare NULL, '', or a
  * DECODE with no match) carries no bytes on the wire and is always NULL; the
  * columns after it must still decode. */
+/* An aggregate that skips NULLs makes the server set a warning in the closing
+ * status's `flags` field, which below 12.1 is a two-byte ub2 (`01 20`). Read
+ * as one byte, everything after it misreads (seerdb#1995). Three groups, the
+ * last all NULL, is the shape that trips it; two groups do not. */
+static void check_aggregate_null_warning(SQLHDBC dbc)
+{
+  const char *name = "aggregate over an all-NULL group (OER warning flags)";
+  char err[256] = "";
+  exec_do(dbc, "DROP TABLE seer_aggwarn", err, sizeof err); /* ignore if absent */
+  if (!SQL_SUCCEEDED(
+          exec_do(dbc, "CREATE TABLE seer_aggwarn (g NUMBER, n NUMBER)", err, sizeof err)) ||
+      !SQL_SUCCEEDED(exec_do(dbc,
+                             "INSERT INTO seer_aggwarn "
+                             "SELECT 1, 12345678901234567890.123 FROM dual UNION ALL "
+                             "SELECT 1, 12345678901234567890.125 FROM dual UNION ALL "
+                             "SELECT 2, 12345678901234567890.127 FROM dual UNION ALL "
+                             "SELECT 2, 12345678901234567890.131 FROM dual UNION ALL "
+                             "SELECT 3, NULL FROM dual",
+                             err, sizeof err))) {
+    fail(name, err[0] ? err : "setup failed");
+    exec_do(dbc, "DROP TABLE seer_aggwarn", err, sizeof err);
+    return;
+  }
+  SQLHSTMT st;
+  SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+  SQLRETURN rc = SQLExecDirect(
+      st, (SQLCHAR *)"SELECT g, AVG(n), COUNT(n) FROM seer_aggwarn GROUP BY g ORDER BY g", SQL_NTS);
+  int rows = 0, ok = SQL_SUCCEEDED(rc);
+  char cnt[16] = "";
+  while (ok && SQL_SUCCEEDED(rc = SQLFetch(st))) {
+    SQLLEN ind = 0;
+    rows++;
+    ok = SQL_SUCCEEDED(SQLGetData(st, 3, SQL_C_CHAR, cnt, sizeof cnt, &ind));
+  }
+  if (ok && rc != SQL_NO_DATA)
+    ok = 0;
+  if (!ok)
+    diag_text(SQL_HANDLE_STMT, st, err, sizeof err);
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  char after[32], err2[256];
+  int alive = SQL_SUCCEEDED(
+      exec_scalar(dbc, "SELECT 'alive' FROM dual", after, sizeof after, err2, sizeof err2));
+  exec_do(dbc, "DROP TABLE seer_aggwarn", err2, sizeof err2);
+  if (ok && rows == 3 && strcmp(cnt, "0") == 0 && alive)
+    pass(name);
+  else {
+    char m[400];
+    snprintf(m, sizeof m, "rows=%d last count='%s' alive=%d %s", rows, cnt, alive, err);
+    fail(name, m);
+  }
+}
+
 static void check_zero_length_columns(SQLHDBC dbc)
 {
   const char *name = "zero-length columns (NULL / '' / DECODE miss)";
@@ -2800,6 +2852,7 @@ int main(void)
 
   check_scalar(dbc, "SELECT literal", "SELECT 3 + 4 FROM DUAL", "7");
   check_zero_length_columns(dbc);
+  check_aggregate_null_warning(dbc);
   check_nested_cursor_column(dbc);
   check_length_boundaries(dbc);
   check_typed_null(dbc);
