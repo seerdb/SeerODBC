@@ -722,6 +722,33 @@ static void check_wide_select(void)
   }
 }
 
+/* An ORA message past 64 bytes comes in 64-byte chunks (0xFE ... 00): it must
+ * reach the connection's error text whole, not as its last chunk. */
+static void check_long_error_text(void)
+{
+  const char *name = "long ORA message text (chunked)";
+  run("DROP TABLE seer9_a_rather_long_table_name");
+  run("CREATE TABLE seer9_a_rather_long_table_name (a_long_column_name_here NUMBER NOT NULL)");
+  SeerStmt *s = NULL;
+  SeerStatus st = SEER_OK;
+  if (seer_stmt_prepare(C, "INSERT INTO seer9_a_rather_long_table_name VALUES (NULL)", &s) ==
+      SEER_OK)
+    st = seer_stmt_execute(s);
+  seer_stmt_close(s);
+  const char *e = seer_last_error(C);
+  const char *want =
+      "ORA-01400: cannot insert NULL into (\"PYO\".\"SEER9_A_RATHER_LONG_TABLE_NAME\""
+      ".\"A_LONG_COLUMN_NAME_HERE\")";
+  int ok = st != SEER_OK && e != NULL && strncmp(e, want, strlen(want)) == 0;
+  char m[300];
+  snprintf(m, sizeof m, "status=%d text='%s'", (int)st, e ? e : "(none)");
+  run("DROP TABLE seer9_a_rather_long_table_name");
+  if (ok)
+    pass(name);
+  else
+    fail(name, m);
+}
+
 int main(void)
 {
   const char *port = getenv("SEER_TEST_PORT");
@@ -754,6 +781,7 @@ int main(void)
   check_rowid();
   check_multibatch_fetch();
   check_error_recovery();
+  check_long_error_text();
   check_rollback();
   check_plsql();
   check_block_directions();
