@@ -117,6 +117,8 @@ SeerStatus seer_o8i_build_login(SeerConn *conn, SeerWriter *w, uint8_t op, const
                                 uint32_t mode, const char *password_field, const char *host,
                                 const char *pid);
 SeerStatus seer_o8i_auth_value(const uint8_t *b, size_t n, const char *key, char **val);
+SeerStatus seer_test_o8i_all8(uint8_t seq, bool fetch, uint32_t cursor, const char *sql,
+                              uint32_t rows, uint8_t **out, size_t *outlen);
 
 /* Test-only: gather a LOBOPS reply's TTI_LOB content (defined in lob.c);
  * SEER_EPROTO when it runs past the end of the reply. */

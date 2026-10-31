@@ -17,6 +17,7 @@
 #
 #   SEER_CONTAINER_HOST   host running the container tiers (default 127.0.0.1)
 #   SEER_9I_HOST          host of the Oracle 9i VM (unset = the 9i tier is skipped)
+#   SEER_8I_HOST          host of the Oracle 8i VM (unset = the 8i tier is skipped)
 #   SEER_MATRIX_USER      default account for every tier   (default pyo)
 #   SEER_MATRIX_PASS      default password for every tier  (default pyo123)
 #   SEER_MATRIX_ONLY      same as --only
@@ -24,7 +25,7 @@
 #
 # Any field of one tier can be overridden with SEER_<TIER>_HOST, _PORT, _TARGET,
 # _USER or _PASS, where <TIER> is the tier name in upper case (11G, 18C, 21C,
-# 23AI, 26AI, 10G, 9I) - e.g. SEER_23AI_USER=system SEER_23AI_PASS=secret.
+# 23AI, 26AI, 10G, 9I, 8I) - e.g. SEER_23AI_USER=system SEER_23AI_PASS=secret.
 #
 # Settings can live in a file instead of the shell: the script sources
 # $SEER_MATRIX_ENV, or tests/odbc/matrix.env if that exists (it is gitignored;
@@ -67,6 +68,7 @@ TPC_BIN="$BUILD/tests/test_tpc"
 OBJBIND_BIN="$BUILD/tests/test_objbind"
 AQ_BIN="$BUILD/tests/test_aq"
 NINE_BIN="$BUILD/tests/test_9i"
+EIGHT_BIN="$BUILD/tests/test_8i"
 if [[ ! -x "$BIN" ]]; then
     echo "integration test not built: $BIN (run: meson compile -C $BUILD)" >&2
     exit 1
@@ -74,6 +76,7 @@ fi
 
 CONTAINER_HOST="${SEER_CONTAINER_HOST:-127.0.0.1}"
 NINE_HOST="${SEER_9I_HOST:-}"
+EIGHT_HOST="${SEER_8I_HOST:-}"
 DEF_USER="${SEER_MATRIX_USER:-pyo}"
 DEF_PASS="${SEER_MATRIX_PASS:-pyo123}"
 
@@ -84,7 +87,7 @@ DEF_PASS="${SEER_MATRIX_PASS:-pyo123}"
 #                   26ai native-encryption bed is lab-specific, 9i is a VM)
 #   kind=odbc    -> ODBC integration test (+ core-API extras); target = SERVICE_NAME
 #   kind=fv2     -> Oracle 9i core-API test (test_9i);          target = SID
-# (8i has no test tier yet: SeerODBC does not speak the 8.1.7 dialect.)
+#   kind=o8i     -> Oracle 8i core-API test (test_8i);          target = SERVICE_NAME
 TIERS=(
     "11g|public|$CONTAINER_HOST|1521|XE|odbc"
     "18c|public|$CONTAINER_HOST|1527|XEPDB1|odbc"
@@ -93,6 +96,7 @@ TIERS=(
     "26ai|local|$CONTAINER_HOST|1526|freepdb1|odbc"
     "10g|local|$CONTAINER_HOST|1525|orcl|odbc"
     "9i|local|$NINE_HOST|1521|orcl|fv2"
+    "8i|local|$EIGHT_HOST|1521|ORCL|o8i"
 )
 
 in_list() {   # $1 word  $2 space-separated list
@@ -184,6 +188,10 @@ for row in "${TIERS[@]}"; do
     if [[ "$kind" == "fv2" ]]; then
         # Oracle 9i: its own core-API test, SID-addressed.
         SEER_TEST_SID="$target" "$NINE_BIN" >"$log" 2>/dev/null
+        grep -v '^SUMMARY' "$log" | sed 's/^/  /'
+    elif [[ "$kind" == "o8i" ]]; then
+        # Oracle 8i: its own core-API test.
+        SEER_TEST_SERVICE="$target" "$EIGHT_BIN" >"$log" 2>/dev/null
         grep -v '^SUMMARY' "$log" | sed 's/^/  /'
     else
         # ODBC integration test (+ core-API extras: two-phase commit, object

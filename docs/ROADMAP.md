@@ -12,8 +12,11 @@ and exercised (most against the live 9i/10g/11g/18c/21c/23ai matrix, see
 
 ## Server versions (negotiated TTC field version)
 
-- [ ] Oracle 8i (8.1.7) — a distinct older protocol dialect; a live 8i VM exists
-      but the driver does not speak it yet.
+- [~] Oracle 8i (8.1.7) — **login + queries, live-validated against an 8i VM**
+      (its own dialect: the OSESSKEY-envelope O3LOGON, a 9.2-era OALL8, fixed-width
+      little-endian describe / rows / status, WE8ISO8859P1 text). Not spoken:
+      DML / DDL / PL/SQL / transaction control and LOB columns (refused with
+      SEER_ENOTIMPL).
 - [x] Oracle 9i — **fv2, live-validated against a 9i VM** (SID=orcl;
       not containerizable — needs an old kernel/glibc). The whole legacy path is in:
       O3LOGON DES auth, the TTI_ALL7 (`0x47`) query/fetch dialect (distinct from the

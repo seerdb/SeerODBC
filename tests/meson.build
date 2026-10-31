@@ -106,6 +106,13 @@ test_o8i_login = executable('test_o8i_login',
 )
 test('8i login', test_o8i_login)
 
+# Oracle 8i OALL8 query / fetch calls, byte for byte against seerdb's encoders.
+test_o8i_stmt = executable('test_o8i_stmt',
+  'unit/test_o8i_stmt.c',
+  dependencies : [seertns_dep],
+)
+test('8i oall8', test_o8i_stmt)
+
 # A LOBOPS reply's content, whole or cut short (a short chunk is an error, not
 # a silently truncated LOB).
 test_lob_content = executable('test_lob_content',
@@ -197,6 +204,13 @@ test('advanced queuing (live)', test_aq, is_parallel : false, timeout : 60)
 # test() so `meson test` / GitHub CI never reference 9i.
 test_9i = executable('test_9i',
   'odbc/test_9i.c',
+  dependencies : [seertns_dep],
+)
+
+# Oracle 8i (8.1.7) core-API integration test: LOCAL ONLY, as test_9i (8i is a
+# VM), run by tests/odbc/run-matrix.sh and not registered as a meson test().
+test_8i = executable('test_8i',
+  'odbc/test_8i.c',
   dependencies : [seertns_dep],
 )
 
