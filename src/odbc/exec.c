@@ -546,7 +546,7 @@ SQLRETURN seer_odbc_describe_prepared(OdbcStmt *s)
   if (st == SEER_OK)
     st = seer_stmt_describe(s->core);
   if (st != SEER_OK) {
-    const char *e = seer_last_error(s->dbc->conn);
+    const char *e = st == SEER_EDB ? seer_last_error(s->dbc->conn) : NULL;
     if (s->core != NULL) {
       seer_stmt_close(s->core);
       s->core = NULL;

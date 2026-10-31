@@ -1745,6 +1745,34 @@ static SeerStatus skip_server_piggyback(SeerReader *r)
 }
 
 /* Walk one response message, appending rows and capturing the OER outcome. */
+/* A reply that failed to decode at `from` may still carry the server's error
+ * after it: its message, "ORA-NNNNN: ...", rides length-prefixed (a ub1
+ * length, or the long form's chunks) at the end of a status. Find the first
+ * one behind the failure point and put it on the connection. */
+static bool error_inside_reply(SeerConn *c, const uint8_t *buf, size_t len, size_t from)
+{
+  for (size_t i = from; i + 10 <= len; i++) {
+    if (memcmp(buf + i, "ORA-", 4) != 0 || buf[i + 4] < '0' || buf[i + 4] > '9')
+      continue;
+    size_t n = len - i;
+    if (i > 0 && buf[i - 1] >= 10 && buf[i - 1] <= n)
+      n = buf[i - 1]; /* the length byte in front of it */
+    while (n > 0 && (buf[i + n - 1] == '\n' || buf[i + n - 1] == '\0'))
+      n--;
+    char *m = malloc(n + 1);
+    if (m == NULL)
+      return false;
+    memcpy(m, buf + i, n);
+    m[n] = '\0';
+    free(c->last_error);
+    c->last_error = m;
+    c->last_error_offset = 0;
+    seer_log(SEER_LOG_ERROR, "stmt: the server reported, inside the reply: %s", m);
+    return true;
+  }
+  return false;
+}
+
 static SeerStatus parse_response(SeerStmt *stmt, const uint8_t *buf, size_t len, bool expect_dcb,
                                  OerResult *oer)
 {
@@ -1833,6 +1861,11 @@ static SeerStatus parse_response(SeerStmt *stmt, const uint8_t *buf, size_t len,
   if (st != SEER_OK) {
     seer_log(SEER_LOG_DEBUG, "stmt: parse failed st=%d at pos %zu/%zu (ok=%d)", (int)st, r.pos,
              r.len, (int)seer_reader_ok(&r));
+    /* A server error can arrive inside the rows - a recursive-SQL failure,
+     * open_cursors exhausted - leaving a row cut short in front of the status
+     * that carries it. The ORA error is the answer, not "protocol error". */
+    if (st == SEER_EPROTO && error_inside_reply(stmt->conn, buf, len, r.pos))
+      return SEER_EDB;
     return st;
   }
   if (!got_oer)
@@ -6197,6 +6230,11 @@ SeerStatus seer_stmt_execute(SeerStmt *stmt)
     return SEER_EPARAM;
   if (!stmt->conn->authenticated)
     return SEER_EPROTO;
+  /* An error message belongs to the call that drew it: a failure here that
+   * carries none must not report the previous statement's. */
+  free(stmt->conn->last_error);
+  stmt->conn->last_error = NULL;
+  stmt->conn->last_error_offset = 0;
   if (stmt->conn->is_8i) {
     /* Oracle 8i: its own 9.2-era OALL8 dialect (seerdb §19.9-19.10). Queries
      * are spoken; DML, DDL and PL/SQL are not - refuse rather than send 9i's
