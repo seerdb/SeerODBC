@@ -3415,6 +3415,10 @@ static uint8_t obj_type_to_ora(const char *tn)
     return ORA_TYPE_BFLOAT;
   if (!strcmp(tn, "BINARY_DOUBLE"))
     return ORA_TYPE_BDOUBLE;
+  if (!strcmp(tn, "TIMESTAMP WITH TZ"))
+    return ORA_TYPE_TIMESTAMPTZ;
+  if (!strcmp(tn, "TIMESTAMP WITH LOCAL TZ"))
+    return ORA_TYPE_TIMESTAMPLTZ;
   if (!strncmp(tn, "TIMESTAMP", 9))
     return ORA_TYPE_TIMESTAMP;
   if (!strcmp(tn, "INTERVAL YEAR TO MONTH"))
@@ -5969,15 +5973,83 @@ static SeerStatus obj_lookup_elem(SeerConn *conn, const char *schema, const char
   return got ? SEER_OK : SEER_EDB;
 }
 
+/* Days from 1970-01-01 to a proleptic Gregorian civil date (any year), and
+ * back (H. Hinnant's algorithms). */
+static int64_t days_from_civil(int64_t y, int m, int d)
+{
+  y -= m <= 2;
+  int64_t era = (y >= 0 ? y : y - 399) / 400;
+  int64_t yoe = y - era * 400;
+  int64_t doy = (153 * (m + (m > 2 ? -3 : 9)) + 2) / 5 + d - 1;
+  int64_t doe = yoe * 365 + yoe / 4 - yoe / 100 + doy;
+  return era * 146097 + doe - 719468;
+}
+
+static void civil_from_days(int64_t z, int *y, int *m, int *d)
+{
+  z += 719468;
+  int64_t era = (z >= 0 ? z : z - 146096) / 146097;
+  int64_t doe = z - era * 146097;
+  int64_t yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+  int64_t doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+  int64_t mp = (5 * doy + 2) / 153;
+  *d = (int)(doy - (153 * mp + 2) / 5 + 1);
+  *m = (int)(mp < 10 ? mp + 3 : mp - 9);
+  *y = (int)(yoe + era * 400 + (*m <= 2));
+}
+
+/* The explicit UTC offset at the end of a datetime text, in minutes: "+HH:MM",
+ * "-HH:MM", "+HHMM" or "Z". false when the text carries none - a WITH TIME
+ * ZONE value is then refused, never given a zone the caller did not state. */
+static bool parse_utc_offset(const char *val, int *minutes)
+{
+  const char *p = val + strlen(val);
+  while (p > val && p[-1] == ' ')
+    p--;
+  if (p > val && (p[-1] == 'Z' || p[-1] == 'z')) {
+    *minutes = 0;
+    return true;
+  }
+  /* back up over the offset's digits and an optional ':' to its sign */
+  const char *e = p;
+  while (p > val && (isdigit((unsigned char)p[-1]) || p[-1] == ':'))
+    p--;
+  if (p == val || (p[-1] != '+' && p[-1] != '-') || p - 1 == val || p[-2] != ' ')
+    return false; /* not a sign standing alone after the time ("2020-01-01" has '-' too) */
+  int hh = 0, mm = 0;
+  char digits[8] = "";
+  size_t nd = 0;
+  for (const char *q = p; q < e && nd < sizeof digits - 1; q++)
+    if (isdigit((unsigned char)*q))
+      digits[nd++] = *q;
+  if (nd == 4) {
+    hh = (digits[0] - '0') * 10 + (digits[1] - '0');
+    mm = (digits[2] - '0') * 10 + (digits[3] - '0');
+  } else if (nd == 2 || nd == 1) {
+    hh = atoi(digits);
+  } else {
+    return false;
+  }
+  if (hh > 14 || mm > 59)
+    return false;
+  *minutes = (p[-1] == '-' ? -1 : 1) * (hh * 60 + mm);
+  return true;
+}
+
 /* Encode one image field (object attribute or collection element) from text:
  * 0xFF for NULL, else <length><raw scalar bytes> by Oracle type - NUMBER as an
  * exact base-100 decimal, DATE/TIMESTAMP from "YYYY-MM-DD[ HH:MM:SS[.fff]]", and
- * everything else as UTF-8 text. */
-static void obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val)
+ * everything else as UTF-8 text. A temporal field takes its width from its
+ * type, as a declared bind does (seerdb PROTOCOL.md §21, faa08ee): DATE 7
+ * bytes; TIMESTAMP and LTZ 11, or 7 when the fraction is zero; WITH TIME ZONE
+ * always 13 - the UTC instant, then the offset's hour + 20 and minute + 60 -
+ * from a value that states its offset (" +02:00", " -0530", "Z"). One that
+ * does not is SEER_EPARAM. */
+static SeerStatus obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val)
 {
   if (val == NULL) {
     seer_writer_u8(body, 0xFF);
-    return;
+    return SEER_OK;
   }
   if (ora_type == ORA_TYPE_BINARY_INTEGER || ora_type == ORA_TYPE_BOOLEAN) {
     /* PLS_INTEGER / BOOLEAN of a PL/SQL record: a 4-byte big-endian integer
@@ -6000,12 +6072,29 @@ static void obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val
       nn = seer_encode_number_int(atoll(val), num);
     obj_write_length(body, (uint32_t)nn);
     seer_writer_bytes(body, num, nn);
-  } else if (ora_type == ORA_TYPE_DATE || ora_type == ORA_TYPE_TIMESTAMP) {
+  } else if (ora_type == ORA_TYPE_DATE || ora_type == ORA_TYPE_TIMESTAMP ||
+             ora_type == ORA_TYPE_TIMESTAMPLTZ || ora_type == ORA_TYPE_TIMESTAMPTZ) {
     int y = 1, mo = 1, d = 1, h = 0, mi = 0, s = 0;
     double frac = 0.0;
     sscanf(val, "%d-%d-%d %d:%d:%lf", &y, &mo, &d, &h, &mi, &frac);
     s = (int)frac;
-    uint8_t dt[11] = {
+    uint32_t nanos = ora_type == ORA_TYPE_DATE ? 0 : (uint32_t)((frac - (double)s) * 1e9 + 0.5);
+    int off = 0;
+    if (ora_type == ORA_TYPE_TIMESTAMPTZ) {
+      if (!parse_utc_offset(val, &off)) {
+        seer_log(SEER_LOG_ERROR, "obj: a TIMESTAMP WITH TIME ZONE value needs its UTC offset "
+                                 "(e.g. \"2020-01-01 10:00:00 +02:00\")");
+        return SEER_EPARAM;
+      }
+      /* the wire carries the UTC instant: shift the wall clock back by the offset */
+      int64_t mins = (days_from_civil(y, mo, d) * 24 + h) * 60 + mi - off;
+      int64_t days = mins >= 0 ? mins / 1440 : -((-mins + 1439) / 1440);
+      int64_t rem = mins - days * 1440;
+      civil_from_days(days, &y, &mo, &d);
+      h = (int)(rem / 60);
+      mi = (int)(rem % 60);
+    }
+    uint8_t dt[13] = {
         (uint8_t)(y / 100 + 100),
         (uint8_t)(y % 100 + 100),
         (uint8_t)mo,
@@ -6013,31 +6102,26 @@ static void obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val
         (uint8_t)(h + 1),
         (uint8_t)(mi + 1),
         (uint8_t)(s + 1),
-        0,
-        0,
-        0,
-        0,
+        (uint8_t)(nanos >> 24),
+        (uint8_t)(nanos >> 16),
+        (uint8_t)(nanos >> 8),
+        (uint8_t)nanos,
+        (uint8_t)(off / 60 + 20), /* offset hour + 20 */
+        (uint8_t)(off % 60 + 60), /* offset minute + 60 */
     };
-    if (ora_type == ORA_TYPE_TIMESTAMP) { /* + 4 big-endian nanoseconds */
-      uint32_t nanos = (uint32_t)((frac - (double)s) * 1e9 + 0.5);
-      dt[7] = (uint8_t)(nanos >> 24);
-      dt[8] = (uint8_t)(nanos >> 16);
-      dt[9] = (uint8_t)(nanos >> 8);
-      dt[10] = (uint8_t)nanos;
-      obj_write_length(body, 11);
-      seer_writer_bytes(body, dt, 11);
-    } else {
-      obj_write_length(body, 7);
-      seer_writer_bytes(body, dt, 7);
-    }
+    size_t n = 7;
+    if (ora_type == ORA_TYPE_TIMESTAMPTZ)
+      n = 13;
+    else if (ora_type != ORA_TYPE_DATE && nanos != 0)
+      n = 11;
+    obj_write_length(body, (uint32_t)n);
+    seer_writer_bytes(body, dt, n);
   } else if (ora_type == OBJ_ATTR_NCHAR) { /* national: AL16UTF16 (UTF-16BE) */
     char *u16 = NULL;
     size_t u16len = 0;
     size_t vl = strlen(val);
-    if (vl > 0 && seer_iconv("UTF-8", "UTF-16BE", val, vl, &u16, &u16len) != 0) {
-      seer_writer_u8(body, 0xFF); /* not valid UTF-8: send NULL, never mojibake */
-      return;
-    }
+    if (vl > 0 && seer_iconv("UTF-8", "UTF-16BE", val, vl, &u16, &u16len) != 0)
+      return SEER_EPARAM; /* not valid UTF-8 */
     obj_write_length(body, (uint32_t)u16len);
     seer_writer_bytes(body, (const uint8_t *)u16, u16len);
     free(u16);
@@ -6046,6 +6130,7 @@ static void obj_encode_field(SeerWriter *body, uint8_t ora_type, const char *val
     obj_write_length(body, (uint32_t)vl);
     seer_writer_bytes(body, (const uint8_t *)val, vl);
   }
+  return SEER_OK;
 }
 
 /* Object bind-value framing (oracledb write_dbobject), shared by SQL object
@@ -6210,9 +6295,13 @@ static SeerStatus obj_build_image(SeerConn *c, const char *schema, const char *t
     free(types);
     return SEER_ENOMEM;
   }
-  for (int i = 0; i < n_attrs; i++)
-    obj_encode_field(&body, types[i], attr_values[i]);
+  for (int i = 0; i < n_attrs && st == SEER_OK; i++)
+    st = obj_encode_field(&body, types[i], attr_values[i]);
   free(types);
+  if (st != SEER_OK) {
+    seer_writer_free(&body);
+    return st;
+  }
   if (!seer_writer_ok(&body)) {
     seer_writer_free(&body);
     return SEER_ENOMEM;
@@ -6550,10 +6639,14 @@ SeerStatus seer_stmt_bind_collection(SeerStmt *stmt, int param, const char *sche
     return SEER_ENOMEM;
   seer_writer_u8(&body, index_table ? 0x10 : 0x00); /* collection flags */
   obj_write_length(&body, (uint32_t)(n_elems > 0 ? n_elems : 0));
-  for (int i = 0; i < n_elems; i++) {
+  for (int i = 0; i < n_elems && st == SEER_OK; i++) {
     if (index_table)
       obj_be4(&body, (uint32_t)i);
-    obj_encode_field(&body, elem_type, elem_values[i]);
+    st = obj_encode_field(&body, elem_type, elem_values[i]);
+  }
+  if (st != SEER_OK) {
+    seer_writer_free(&body);
+    return st;
   }
   if (!seer_writer_ok(&body)) {
     seer_writer_free(&body);
