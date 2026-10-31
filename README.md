@@ -26,9 +26,10 @@ tier runs the full ODBC surface through unixODBC; 9i (the legacy fv2 / `TTI_ALL7
 dialect) is validated through the core API. 11g/21c/23ai are the public-CI tier;
 9i, 10g and 18c stay local (their images aren't redistributable). 12.1 / 12.2 /
 19c have no live server here but share the down-negotiated 12c wire forms (the
-12.1 level is exercised by capping a 21c session at fv7). Not supported: 8i (a
-distinct older protocol dialect) and native network encryption where the server
-*requires* it (26ai).
+12.1 level is exercised by capping a 21c session at fv7). 8i (8.1.7) is
+**read-only**: it logs in and runs queries (validated live through the core API
+and an ODBC Driver Manager connection); DML, DDL, PL/SQL, COMMIT / ROLLBACK and
+LOB columns are refused with "not implemented".
 
 - **Connect & auth** — O5LOGON across the 10g (DES), 11g (AES-192/SHA-1) and
   12c (AES-256/PBKDF2) verifiers, 23ai fv24 fast-auth, and 9i O3LOGON (legacy
