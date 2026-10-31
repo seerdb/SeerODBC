@@ -300,6 +300,43 @@ static void check_aggregate_null_warning(SQLHDBC dbc)
   }
 }
 
+/* A result fetched over several batches whose next batch starts on a row
+ * repeating a value of the previous one: the row header's bit vector then says
+ * that column is not sent. Read anyway, the next column's bytes took its place
+ * and the fetch failed with a protocol error - any query over 100 rows with
+ * such a column (a constant, a repeated group key). */
+static void check_batch_resume_repeated_column(SQLHDBC dbc)
+{
+  const char *name = "multi-batch fetch with a repeated column";
+  SQLHSTMT st;
+  char err[256] = "";
+  SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
+  SQLRETURN rc = SQLExecDirect(
+      st, (SQLCHAR *)"SELECT level a, 'tail' t FROM dual CONNECT BY level <= 250", SQL_NTS);
+  int rows = 0, good = SQL_SUCCEEDED(rc);
+  while (good && SQL_SUCCEEDED(rc = SQLFetch(st))) {
+    char a[16] = "", t[16] = "";
+    SQLLEN ia = 0, it = 0;
+    SQLGetData(st, 1, SQL_C_CHAR, a, sizeof a, &ia);
+    SQLGetData(st, 2, SQL_C_CHAR, t, sizeof t, &it);
+    rows++;
+    if (atoi(a) != rows || strcmp(t, "tail") != 0)
+      good = 0;
+  }
+  if (good && rc != SQL_NO_DATA)
+    good = 0;
+  if (!good)
+    diag_text(SQL_HANDLE_STMT, st, err, sizeof err);
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  if (good && rows == 250)
+    pass(name);
+  else {
+    char m[320];
+    snprintf(m, sizeof m, "rows=%d %s", rows, err);
+    fail(name, m);
+  }
+}
+
 static void check_zero_length_columns(SQLHDBC dbc)
 {
   const char *name = "zero-length columns (NULL / '' / DECODE miss)";
@@ -3005,6 +3042,7 @@ int main(void)
   check_scalar(dbc, "SELECT literal", "SELECT 3 + 4 FROM DUAL", "7");
   check_dbms_ver(dbc);
   check_zero_length_columns(dbc);
+  check_batch_resume_repeated_column(dbc);
   check_aggregate_null_warning(dbc);
   check_nested_cursor_column(dbc);
   check_length_boundaries(dbc);

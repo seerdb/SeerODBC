@@ -925,15 +925,30 @@ static SeerStatus parse_implicit(SeerReader *r, SeerStmt *stmt)
   return SEER_OK;
 }
 
-static SeerStatus parse_rxh(SeerReader *r)
+/* The row header. Its column bit vector, when it carries one, says which
+ * columns the batch's FIRST row sends - as a TTI_BVC does for the row after
+ * it: a fetch that resumes a result can start on a row repeating a value of
+ * the previous batch's last row, and that column is then not sent. Ignoring
+ * the vector read the next column's bytes in its place (seerdb tns.py's RXH
+ * handling; python-oracledb _process_row_header). */
+static SeerStatus parse_rxh(SeerReader *r, uint8_t **bv, size_t *bvlen)
 {
   (void)seer_reader_u8(r); /* flags */
   for (int i = 0; i < 4; i++)
     (void)seer_dec_sb4(r); /* num requests/iter/iters/buffer len */
-  int64_t bvlen = seer_dec_sb4(r);
-  if (bvlen > 0) {
+  int64_t n = seer_dec_sb4(r);
+  if (n > 0) {
     (void)seer_reader_u8(r); /* repeated length */
-    seer_reader_bytes(r, (size_t)bvlen);
+    const uint8_t *p = seer_reader_bytes(r, (size_t)n);
+    if (p != NULL) {
+      uint8_t *copy = malloc((size_t)n);
+      if (copy == NULL)
+        return SEER_ENOMEM;
+      memcpy(copy, p, (size_t)n);
+      free(*bv);
+      *bv = copy;
+      *bvlen = (size_t)n;
+    }
   }
   seer_skip_bytes_with_length(r); /* rxhrid */
   return seer_reader_ok(r) ? SEER_OK : SEER_EPROTO;
@@ -1751,7 +1766,7 @@ static SeerStatus parse_response(SeerStmt *stmt, const uint8_t *buf, size_t len,
       st = expect_dcb ? parse_dcb(&r, stmt) : SEER_EPROTO;
       break;
     case TTI_RXH:
-      st = parse_rxh(&r);
+      st = parse_rxh(&r, &bv, &bvlen);
       break;
     case TTI_BVC:
       st = parse_bvc(&r, stmt->ncols, &bv, &bvlen);
