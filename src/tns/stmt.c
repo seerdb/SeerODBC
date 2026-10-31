@@ -4106,21 +4106,60 @@ static int64_t fv2_oer_code(const uint8_t *resp, size_t rlen)
   return seer_reader_ok(&r) ? code : -1;
 }
 
-/* Surface a 9i OER's trailing "ORA-NNNNN: ..." text on conn->last_error (the
- * final length-prefixed run; middle fields are version-specific). */
+/* The message of a 9i status as a chunked run starting at resp[i]: 0xFE, then
+ * chunks (a length byte and that many bytes), then a zero length that is the
+ * reply's last byte. The joined text, or NULL when resp[i] starts no such run
+ * or the text is not an "ORA-" message. Caller frees. */
+static char *fv2_chunked_message(const uint8_t *resp, size_t rlen, size_t i)
+{
+  if (resp[i] != 0xFE)
+    return NULL;
+  size_t total = 0, j = i + 1;
+  while (j < rlen && resp[j] != 0) {
+    total += resp[j];
+    j += 1 + (size_t)resp[j];
+  }
+  if (j != rlen - 1 || total < 4)
+    return NULL;
+  char *msg = malloc(total + 1);
+  if (msg == NULL)
+    return NULL;
+  size_t off = 0;
+  for (j = i + 1; resp[j] != 0; j += 1 + (size_t)resp[j]) {
+    memcpy(msg + off, resp + j + 1, resp[j]);
+    off += resp[j];
+  }
+  msg[off] = '\0';
+  if (strncmp(msg, "ORA-", 4) != 0) {
+    free(msg);
+    return NULL;
+  }
+  return msg;
+}
+
+/* Surface a 9i OER's trailing "ORA-NNNNN: ..." text on conn->last_error: the
+ * reply's last field (middle fields are version-specific), either one
+ * length-prefixed run or - past 64 bytes - a chunked one (0xFE, 64-byte
+ * chunks, a zero length; seerdb PROTOCOL.md §19, ccd3ee7). Matching only the
+ * plain form took the last chunk alone for a long message. */
 static void fv2_set_error(SeerConn *c, const uint8_t *resp, size_t rlen)
 {
-  for (size_t i = 3; i + 1 < rlen; i++) {
+  char *msg = NULL;
+  for (size_t i = 3; i + 1 < rlen && msg == NULL; i++)
+    msg = fv2_chunked_message(resp, rlen, i);
+  for (size_t i = 3; i + 1 < rlen && msg == NULL; i++) {
     size_t len = resp[i];
     if (len && i + 1 + len == rlen) {
-      free(c->last_error);
-      c->last_error = malloc(len + 1);
-      if (c->last_error != NULL) {
-        memcpy(c->last_error, resp + i + 1, len);
-        c->last_error[len] = '\0';
+      msg = malloc(len + 1);
+      if (msg != NULL) {
+        memcpy(msg, resp + i + 1, len);
+        msg[len] = '\0';
       }
-      return;
     }
+  }
+  if (msg != NULL) {
+    free(c->last_error);
+    c->last_error = msg;
   }
 }
 
