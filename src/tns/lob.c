@@ -84,8 +84,11 @@ static bool sb4_lob_chunks(const SeerConn *c)
 /* Accumulate the leading TTI_LOB content chunk(s) of a LOBOPS reply into a
  * fresh buffer; stop at the first non-LOB token (the RPA/OER trailer). The
  * 0xFE marker introduces a chunked run whose per-chunk lengths are sb4-prefixed
- * on 12c+ (`sb4_chunks`) and a bare ub1 on 11g. On SEER_OK *out is a malloc'd
- * buffer of *outlen bytes (caller frees). */
+ * on 12c+ (`sb4_chunks`) and a bare ub1 on 11g, ended by a zero length. On
+ * SEER_OK *out is a malloc'd buffer of *outlen bytes (caller frees). A chunk
+ * or length that runs past the end of the reply is SEER_EPROTO: the content
+ * is incomplete, and handing back what arrived would be a silently truncated
+ * LOB (seerdb a618d4c). */
 static SeerStatus accumulate_lob_content(const uint8_t *resp, size_t rlen, bool sb4_chunks,
                                          uint8_t **out, size_t *outlen)
 {
@@ -95,31 +98,47 @@ static SeerStatus accumulate_lob_content(const uint8_t *resp, size_t rlen, bool 
   if (!seer_writer_init(&acc, 256))
     return SEER_ENOMEM;
 
-  while (seer_reader_remaining(&r) > 0 && seer_reader_ok(&r)) {
+  bool truncated = false;
+  while (!truncated && seer_reader_remaining(&r) > 0) {
     if (r.buf[r.pos] != TTI_LOB)
       break;
     (void)seer_reader_u8(&r); /* TTI_LOB token */
     uint8_t len = seer_reader_u8(&r);
-    if (!seer_reader_ok(&r))
+    if (!seer_reader_ok(&r)) {
+      truncated = true;
       break;
+    }
     if (len == 0)
       continue;
     if (len == 0xFE) {
       for (;;) {
         int64_t clen = sb4_chunks ? seer_dec_sb4(&r) : (int64_t)seer_reader_u8(&r);
-        if (!seer_reader_ok(&r) || clen <= 0)
+        if (!seer_reader_ok(&r)) {
+          truncated = true;
           break;
+        }
+        if (clen <= 0)
+          break; /* the run's terminator */
         const uint8_t *p = seer_reader_bytes(&r, (size_t)clen);
-        if (p == NULL)
+        if (p == NULL) {
+          truncated = true;
           break;
+        }
         seer_writer_bytes(&acc, p, (size_t)clen);
       }
     } else {
       const uint8_t *p = seer_reader_bytes(&r, len);
-      if (p == NULL)
+      if (p == NULL) {
+        truncated = true;
         break;
+      }
       seer_writer_bytes(&acc, p, len);
     }
+  }
+  if (truncated) {
+    seer_log(SEER_LOG_ERROR, "lob: content runs past the end of the reply (%zu bytes)", rlen);
+    seer_writer_free(&acc);
+    return SEER_EPROTO;
   }
 
   if (!seer_writer_ok(&acc)) {
@@ -353,4 +372,10 @@ SeerStatus seer_lob_write(SeerConn *conn, const uint8_t *locator, size_t loclen,
     return SEER_ENOMEM;
   }
   return lobop_round_trip(conn, &req, resp, rlen);
+}
+
+SeerStatus seer_test_lob_content(const uint8_t *resp, size_t rlen, bool sb4_chunks, uint8_t **out,
+                                 size_t *outlen)
+{
+  return accumulate_lob_content(resp, rlen, sb4_chunks, out, outlen);
 }

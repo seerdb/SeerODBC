@@ -104,6 +104,11 @@ SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len, uint
  * and ORA code (defined in stmt.c). Backs the fv2 status regression test. */
 void seer_test_fv2_decode_dml(const uint8_t *buf, size_t len, int64_t *rowcount, int64_t *code);
 
+/* Test-only: gather a LOBOPS reply's TTI_LOB content (defined in lob.c);
+ * SEER_EPROTO when it runs past the end of the reply. */
+SeerStatus seer_test_lob_content(const uint8_t *resp, size_t rlen, bool sb4_chunks, uint8_t **out,
+                                 size_t *outlen);
+
 /* Pipelining (§32/#158, defined in stmt.c). seer_stmt_set_prefetch tunes a fetch
  * op's inline prefetch; seer_stmt_pipeline_burst runs n freshly-prepared ops as
  * one token-tagged round trip, filling the stmts + per-op ora_codes. Used by the
