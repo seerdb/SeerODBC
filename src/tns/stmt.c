@@ -198,6 +198,9 @@ struct SeerStmt {
   bool batch_errors;     /* arm batcherrors for array DML (continue on row error) */
   SeerBatchError *berrs; /* per-row failures captured from the OER */
   size_t nberrs;
+  /* The current cursor is one the statement holds no SQL for (a REF CURSOR,
+   * an implicit result): its rows are fetched with a fetch-only OALL8. */
+  bool fetch_by_oall8;
   /* A REF CURSOR captured from a PL/SQL OUT bind (drained into cols/rows). */
   bool refcursor_present;
   int refcursor_id;
@@ -3114,6 +3117,66 @@ static SeerStatus build_fetch(SeerStmt *stmt, SeerWriter *w)
   return SEER_OK;
 }
 
+/* A fetch from a cursor the statement holds no SQL for - a REF CURSOR, an
+ * implicit result: an OALL8 on its id with no statement and the options
+ * NOT_PLSQL | FETCH (0x8040), as python-oracledb and OCI send it. 10g..21c
+ * answer a TTI_FETCH on such a cursor with each CURSOR() cell of its rows cut
+ * to `02 <ub4 id>`, no inline describe, which desyncs the row; to this call
+ * every server sends the full cell. It carries no piggybacks, as a TTI_FETCH
+ * carries none: the close queue may hold the cursor's own parent, and closing
+ * that first closes this one (seerdb PROTOCOL.md §5.1, #1462). */
+static SeerStatus build_fetch_only(SeerStmt *stmt, SeerWriter *w)
+{
+  SeerConn *c = stmt->conn;
+  int fv = c->field_version;
+  if (!seer_writer_init(w, 64))
+    return SEER_ENOMEM;
+  seer_ttc_fun_header(c, w, TTI_ALL8);
+  seer_enc_sb4(w, 0x8040u);                   /* NOT_PLSQL | FETCH */
+  seer_enc_sb4(w, (uint32_t)stmt->cursor_id); /* cursor */
+  seer_writer_u8(w, 0);                       /* query absent */
+  seer_enc_sb4(w, 0);                         /* query length */
+  seer_writer_u8(w, 1);                       /* all8 present */
+  seer_enc_sb4(w, 13);                        /* all8 length */
+  seer_writer_u8(w, 0);
+  seer_writer_u8(w, 0);
+  seer_enc_sb4(w, 0);             /* long max */
+  seer_enc_sb4(w, PREFETCH_ROWS); /* rows */
+  seer_enc_sb4(w, 0x7FFFFFFF);    /* max value */
+  seer_writer_u8(w, 0);           /* binds absent */
+  seer_enc_sb4(w, 0);
+  for (int i = 0; i < 5; i++)
+    seer_writer_u8(w, 0);
+  seer_writer_u8(w, 0); /* defines absent */
+  seer_enc_sb4(w, 0);
+  seer_writer_u8(w, 0); /* registration 0,0,1 .. */
+  seer_writer_u8(w, 0);
+  seer_writer_u8(w, 1);
+  if ((c->server_release >> 24) != 10)
+    for (int i = 0; i < 5; i++)
+      seer_writer_u8(w, 0);
+  if (fv >= TTC_FIELD_VERSION_12_1) {
+    for (int i = 0; i < 3; i++)
+      seer_writer_u8(w, 0); /* al8pidmlrc */
+    if (fv >= TTC_FIELD_VERSION_12_2)
+      for (int i = 0; i < 5; i++)
+        seer_writer_u8(w, 0); /* al8sqlsig / SQL id */
+    if (fv > TTC_FIELD_VERSION_12_2)
+      for (int i = 0; i < 2; i++)
+        seer_writer_u8(w, 0); /* 12.2_EXT1 chunk ids */
+  }
+  uint32_t all8[13] = {0};
+  all8[1] = PREFETCH_ROWS; /* rows to return */
+  all8[7] = 1;             /* a query */
+  for (int i = 0; i < 13; i++)
+    seer_enc_sb4(w, all8[i]);
+  if (!seer_writer_ok(w)) {
+    seer_writer_free(w);
+    return SEER_ENOMEM;
+  }
+  return SEER_OK;
+}
+
 /* The call that fetches a query's next rows: a plain TTI_FETCH - or, for a
  * result with LOB columns whose rows have not started, the DEFINE call, from
  * which on those columns come inline as LONG / LONG RAW. The columns are
@@ -3122,7 +3185,7 @@ static SeerStatus build_fetch(SeerStmt *stmt, SeerWriter *w)
 static SeerStatus build_next_fetch(SeerStmt *stmt, SeerWriter *w)
 {
   if (stmt->nrows > 0 || !wants_lob_define(stmt))
-    return build_fetch(stmt, w);
+    return stmt->fetch_by_oall8 ? build_fetch_only(stmt, w) : build_fetch(stmt, w);
   for (int i = 0; i < stmt->ncols; i++)
     if (stmt->cols[i].ora_type == ORA_TYPE_CLOB || stmt->cols[i].ora_type == ORA_TYPE_BLOB)
       stmt->cols[i].inline_long = true;
@@ -5320,8 +5383,9 @@ SeerStatus seer_stmt_execute(SeerStmt *stmt)
     stmt->ncols = 0;
     stmt->described_only = false;
   }
-  free_batch_errors(stmt);   /* clear any prior execute's failures */
-  free_implicit(stmt);       /* and any prior implicit result sets   */
+  free_batch_errors(stmt); /* clear any prior execute's failures */
+  free_implicit(stmt);     /* and any prior implicit result sets   */
+  stmt->fetch_by_oall8 = false;
   free(stmt->dml_rowcounts); /* and any prior array-DML row counts   */
   stmt->dml_rowcounts = NULL;
   stmt->n_dml_rowcounts = 0;
@@ -5457,6 +5521,7 @@ retry_exec:
     stmt->ncols = stmt->refcursor_ncols;
     stmt->refcursor_cols = NULL;
     stmt->cursor_id = stmt->refcursor_id;
+    stmt->fetch_by_oall8 = true;
     seer_log(SEER_LOG_DEBUG, "stmt: draining REF CURSOR %d (%d columns)", stmt->refcursor_id,
              stmt->ncols);
     st = fetch_all_rows(stmt);
@@ -5618,6 +5683,7 @@ SeerStatus seer_stmt_next_result(SeerStmt *stmt)
   ir->cols = NULL; /* moved out; close won't double-free */
   ir->ncols = 0;
   stmt->cursor_id = ir->cursor_id;
+  stmt->fetch_by_oall8 = true;
 
   SeerStatus st = fetch_all_rows(stmt);
   if (st != SEER_OK)
@@ -8015,6 +8081,24 @@ out:
 void seer_test_fv2_decode_dml(const uint8_t *buf, size_t len, int64_t *rowcount, int64_t *code)
 {
   fv2_decode_dml_response(buf, len, rowcount, code);
+}
+
+SeerStatus seer_test_build_fetch_only(uint8_t fv, uint32_t release, uint8_t seq, int cursor,
+                                      uint8_t **out, size_t *outlen)
+{
+  struct SeerConn conn;
+  memset(&conn, 0, sizeof conn);
+  conn.field_version = fv;
+  conn.server_release = release;
+  conn.seq = seq;
+  SeerStmt stmt = {.conn = &conn, .cursor_id = cursor};
+  SeerWriter w;
+  SeerStatus st = build_fetch_only(&stmt, &w);
+  if (st != SEER_OK)
+    return st;
+  *out = w.buf;
+  *outlen = w.len;
+  return SEER_OK;
 }
 
 SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len, uint8_t fv,

@@ -100,6 +100,12 @@ SeerStatus seer_tpc_build_switch(struct SeerConn *c, SeerWriter *w, uint32_t op,
 SeerStatus seer_test_parse_execute_response(const uint8_t *buf, size_t len, uint8_t fv,
                                             int *out_ncols, int64_t *out_err);
 
+/* Test-only: build the fetch-only OALL8 for `cursor` on a connection at field
+ * version `fv` / server release `release`, whose next sequence number is `seq`
+ * (defined in stmt.c). The caller frees *out. */
+SeerStatus seer_test_build_fetch_only(uint8_t fv, uint32_t release, uint8_t seq, int cursor,
+                                      uint8_t **out, size_t *outlen);
+
 /* Test-only: decode a 9i (fv2) DML/DDL status reply into its affected-row count
  * and ORA code (defined in stmt.c). Backs the fv2 status regression test. */
 void seer_test_fv2_decode_dml(const uint8_t *buf, size_t len, int64_t *rowcount, int64_t *code);

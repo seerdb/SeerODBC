@@ -106,6 +106,14 @@ test_lob_content = executable('test_lob_content',
 )
 test('lob content', test_lob_content)
 
+# The fetch-only OALL8 that drains a REF CURSOR / implicit result, against the
+# frame a live 11g answered (seerdb #1462).
+test_fetch_only = executable('test_fetch_only',
+  'unit/test_fetch_only.c',
+  dependencies : [seertns_dep],
+)
+test('fetch-only oall8', test_fetch_only)
+
 # Accept-and-reject stubs for features not on the thin wire: sharding (§37) + CQN
 # (§38). Pure offline: the reject paths take no network.
 test_stubs = executable('test_stubs',
