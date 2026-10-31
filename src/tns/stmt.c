@@ -4132,27 +4132,49 @@ static SeerStatus fv2_decode_column(SeerReader *r, SeerColumn *col)
   return SEER_OK;
 }
 
-/* Decode the describe RPA (08 01 numcols, then per column) into a column array. */
+/* Skip a describe's type schema or type name: a ub4 length, then the DALC
+ * name when there is one (only an object column names its type). */
+static SeerStatus fv2_skip_type_ident(SeerReader *r)
+{
+  int64_t len = seer_dec_sb4(r);
+  if (!seer_reader_ok(r) || len < 0)
+    return SEER_EPROTO;
+  if (len == 0)
+    return SEER_OK;
+  uint8_t *v = NULL;
+  size_t vl = 0;
+  SeerStatus st = seer_dec_dalc(r, &v, &vl);
+  free(v);
+  return st;
+}
+
+/* Decode the describe RPA into a column array:
+ *   08 <ub4 numcols> <column>*
+ *   column = <OAC-fv2> <null_ok> <name...> <ub4 type_schema_len> [<DALC>]
+ *            <ub4 type_name_len> [<DALC>]
+ * The count is a ub4 (`01 2c` would be 44; 300 columns are `02 01 2c`), and
+ * a column that is not an object sends its two type lengths as `00 00`
+ * (seerdb PROTOCOL.md §19.1, #2306). */
 static SeerStatus fv2_decode_describe(const uint8_t *data, size_t dlen, SeerColumn **out_cols,
                                       int *out_n)
 {
   if (dlen < 3 || data[0] != TTI_RPA)
     return SEER_EPROTO;
-  int ncols = data[2];
-  if (ncols <= 0 || ncols > 4096)
+  SeerReader r;
+  seer_reader_init(&r, data + 1, dlen - 1);
+  int64_t n = seer_dec_sb4(&r);
+  if (!seer_reader_ok(&r) || n <= 0 || n > 4096)
     return SEER_EPROTO;
+  int ncols = (int)n;
   SeerColumn *cols = calloc((size_t)ncols, sizeof *cols);
   if (cols == NULL)
     return SEER_ENOMEM;
-  SeerReader r;
-  seer_reader_init(&r, data + 3, dlen - 3);
   for (int i = 0; i < ncols; i++) {
-    if (fv2_decode_column(&r, &cols[i]) != SEER_OK) {
+    if (fv2_decode_column(&r, &cols[i]) != SEER_OK || fv2_skip_type_ident(&r) != SEER_OK ||
+        fv2_skip_type_ident(&r) != SEER_OK) {
       free_columns(cols, ncols);
       return SEER_EPROTO;
     }
-    if (seer_reader_remaining(&r) >= 2 && r.buf[r.pos] == 0 && r.buf[r.pos + 1] == 0)
-      r.pos += 2; /* inter-column separator */
   }
   *out_cols = cols;
   *out_n = ncols;
@@ -4723,9 +4745,8 @@ static SeerStatus fv2_execute_select(SeerStmt *stmt)
                                   0,    0x01, 0x01, 0x07, 0x01, 0x01, 0x02, 0};
       seer_writer_bytes(&w, h, sizeof h);
     }
-    seer_writer_u8(&w, 0x01);
-    seer_writer_u8(&w, 0x01);
-    seer_writer_u8(&w, (uint8_t)ncols);
+    seer_writer_u8(&w, 0x01); /* defines pointer present */
+    seer_enc_sb4(&w, ncols);  /* define count, a ub4: 300 is `02 01 2c` */
     {
       static const uint8_t h2[] = {0, 0, 0x01, 0x01, 0x01, 0x0a, 0, 0, 0, 0, 0};
       seer_writer_bytes(&w, h2, sizeof h2);

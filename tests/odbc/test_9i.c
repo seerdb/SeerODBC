@@ -666,6 +666,62 @@ static void check_rowid(void)
   }
 }
 
+/* The describe's column count and the execute's define count are ub4s: 300
+ * columns are `02 01 2c`, which one byte cannot carry. A column named by an
+ * expression longer than 255 bytes has its name chunked. */
+static void check_wide_select(void)
+{
+  const char *name = "300-column SELECT + long column name";
+  char sql[4096];
+  /* "SELECT 1 c1,2 c2,...,300 c300 FROM dual" (about 2.7 KB) */
+  strcpy(sql, "SELECT ");
+  for (int i = 1; i <= 300; i++) {
+    char item[24];
+    snprintf(item, sizeof item, "%s%d c%d", i > 1 ? "," : "", i, i);
+    strncat(sql, item, sizeof sql - strlen(sql) - 1);
+  }
+  strncat(sql, " FROM dual", sizeof sql - strlen(sql) - 1);
+  int ncols = 0;
+  char last[16] = "";
+  SeerStmt *s = NULL;
+  if (seer_stmt_prepare(C, sql, &s) == SEER_OK && seer_stmt_execute(s) == SEER_OK &&
+      seer_stmt_fetch(s) == SEER_OK) {
+    ncols = seer_stmt_num_cols(s);
+    const char *v = NULL;
+    int n = 0;
+    if (seer_stmt_get_string(s, 299, &v, &n) == SEER_OK && v)
+      snprintf(last, sizeof last, "%s", v);
+  }
+  seer_stmt_close(s);
+
+  char a[151], b[151];
+  memset(a, 'a', 150);
+  memset(b, 'b', 150);
+  a[150] = b[150] = '\0';
+  snprintf(sql, sizeof sql, "SELECT '%s' || '%s', 'tail' FROM dual", a, b);
+  size_t vlen = 0;
+  char tail[16] = "";
+  s = NULL;
+  if (seer_stmt_prepare(C, sql, &s) == SEER_OK && seer_stmt_execute(s) == SEER_OK &&
+      seer_stmt_fetch(s) == SEER_OK) {
+    const char *v = NULL;
+    int n = 0;
+    if (seer_stmt_get_string(s, 0, &v, &n) == SEER_OK && v)
+      vlen = strlen(v);
+    if (seer_stmt_get_string(s, 1, &v, &n) == SEER_OK && v)
+      snprintf(tail, sizeof tail, "%s", v);
+  }
+  seer_stmt_close(s);
+
+  if (ncols == 300 && strcmp(last, "300") == 0 && vlen == 300 && strcmp(tail, "tail") == 0)
+    pass(name);
+  else {
+    char m[128];
+    snprintf(m, sizeof m, "ncols=%d last='%s' long value=%zu tail='%s'", ncols, last, vlen, tail);
+    fail(name, m);
+  }
+}
+
 int main(void)
 {
   const char *port = getenv("SEER_TEST_PORT");
@@ -689,6 +745,7 @@ int main(void)
   check_select_scalar();
   check_zero_length_columns();
   check_select_table();
+  check_wide_select();
   check_nullability();
   check_null_fetch();
   check_dml_binds();
