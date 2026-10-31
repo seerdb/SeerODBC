@@ -431,6 +431,12 @@ SeerStatus seer_stmt_col_vector(SeerStmt *stmt, int col, int *dims, int *format)
  * "SELECT nonexistent FROM dual"; 0 when it gave none. */
 long seer_last_error_offset(SeerConn *conn);
 
+/* The server's release as its five dotted fields (e.g. 23, 26, 2, 0, 0), from
+ * the word it sends at login. Before 18c they are major.minor.app.component.
+ * platform; from 18c, major.update.revision.increment.extension. SEER_ENOTIMPL
+ * when the server sent none (Oracle 9i). */
+SeerStatus seer_server_version(SeerConn *conn, int version[5]);
+
 /* Advance to the next row. SEER_OK if a row is now current, SEER_ENODATA when
  * the result set is exhausted. */
 SeerStatus seer_stmt_fetch(SeerStmt *stmt);

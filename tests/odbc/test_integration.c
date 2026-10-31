@@ -1161,6 +1161,37 @@ static void check_vector_metadata(SQLHDBC dbc)
   }
 }
 
+/* SQL_DBMS_VER reports the connected server's release ("##.##.####", then
+ * the dotted release), decoded from its login word in that release's layout
+ * (18c+ differs). It must agree with the server's own product_component_version
+ * on the major release and, from 19c, the release update (18c's word names
+ * only the base release, 18.0, where the view says 18.4). */
+static void check_dbms_ver(SQLHDBC dbc)
+{
+  const char *name = "SQL_DBMS_VER matches the server release";
+  char ver[128] = "", pcv[64] = "", err[256] = "";
+  SQLGetInfo(dbc, SQL_DBMS_VER, ver, sizeof ver, NULL);
+  /* VERSION names only the base release from 18c (21.0.0.0.0 on a 21.3 XE);
+   * VERSION_FULL, 18c+, has the release update. */
+  if (!SQL_SUCCEEDED(exec_scalar(dbc,
+                                 "SELECT MAX(version_full) FROM product_component_version "
+                                 "WHERE product LIKE 'Oracle%'",
+                                 pcv, sizeof pcv, err, sizeof err)))
+    exec_scalar(dbc,
+                "SELECT MAX(version) FROM product_component_version WHERE product LIKE 'Oracle%'",
+                pcv, sizeof pcv, err, sizeof err);
+  int vmaj = 0, vmin = 0, pmaj = 0, pmin = 0;
+  int ok = sscanf(ver, "%d.%d.", &vmaj, &vmin) == 2 && sscanf(pcv, "%d.%d", &pmaj, &pmin) == 2 &&
+           vmaj == pmaj && (pmaj < 19 || vmin == pmin) && strstr(ver, " Oracle ") != NULL;
+  if (ok)
+    pass(name);
+  else {
+    char m[300];
+    snprintf(m, sizeof m, "SQL_DBMS_VER '%s' vs product_component_version '%s'", ver, pcv);
+    fail(name, m);
+  }
+}
+
 /* Whether the server is 12c or later (SQL_DBMS_VER is a fixed string, so ask
  * the server). */
 static int server_is_12c(SQLHDBC dbc)
@@ -2892,6 +2923,7 @@ int main(void)
   printf("  connected, DBMS version %s\n", ver[0] ? ver : "(unknown)");
 
   check_scalar(dbc, "SELECT literal", "SELECT 3 + 4 FROM DUAL", "7");
+  check_dbms_ver(dbc);
   check_zero_length_columns(dbc);
   check_aggregate_null_warning(dbc);
   check_nested_cursor_column(dbc);
