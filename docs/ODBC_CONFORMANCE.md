@@ -65,9 +65,10 @@ and fetch are supported regardless.
 
 ## Implemented since the first cut
 
-`SQLMoreResults` (implicit result sets, 12c and later; `SQL_MULT_RESULT_SETS` and
-`SQL_BATCH_SUPPORT` say so per release, #312), `SQLCancel` (data-at-exec abort + in-band
-break), `SQLNativeSql`, `SQLBrowseConnect` (iterative connect), and the full
+`SQLMoreResults` (implicit result sets, 12c and later, `SQL_BATCH_SUPPORT` saying
+so per release, #312; and on every release a query run with a parameter array,
+one result set per parameter set, `SQL_PARAM_ARRAY_SELECTS` = `SQL_PAS_BATCH`, #431),
+`SQLCancel` (data-at-exec abort + in-band break), `SQLNativeSql`, `SQLBrowseConnect` (iterative connect), and the full
 descriptor API (`SQLGetDescField` / `SQLGetDescRec` read path; `SQLSetDescField` /
 `SQLSetDescRec` write path) on the implicit ARD/APD/IRD/IPD reachable via
 `SQLGetStmtAttr`. Writing a descriptor field updates the same bind/parameter array

@@ -218,6 +218,12 @@ typedef struct {
   SQLUSMALLINT *param_operation; /* SQL_ATTR_PARAM_OPERATION_PTR: SQL_PARAM_IGNORE rows */
   SQLULEN *param_rows;           /* the parameter sets executed, by their row (malloc'd) */
   SQLULEN n_param_rows;
+  /* A query with a parameter array runs one set per result set
+   * (SQL_PAS_BATCH, #431): set pas_k of param_rows now, the next on
+   * SQLMoreResults, by re-preparing pas_sql (the SQL as sent). */
+  int pas_query;
+  SQLULEN pas_k;
+  char *pas_sql;
   SQLLEN *dml_row_counts; /* SQL_ATTR_SEER_DML_ROW_COUNTS (app buffer) */
   /* Row-array (block) fetch. */
   SQLULEN row_array_size;      /* SQL_ATTR_ROW_ARRAY_SIZE, default 1 */
@@ -333,5 +339,8 @@ SQLRETURN seer_odbc_pos_update(OdbcStmt *s, long row);
 
 /* Free the updatable-cursor bookkeeping (rowids, base table). */
 void seer_odbc_free_updatable(OdbcStmt *s);
+/* The next parameter set of a query run one set per result set (#431):
+ * SQL_NO_DATA when none is left or none was running. */
+SQLRETURN seer_odbc_next_param_set(OdbcStmt *s);
 
 #endif /* SEERODBC_INTERNAL_H */

@@ -935,35 +935,60 @@ static void check_array_block(SQLHDBC dbc)
                         "BEGIN INSERT INTO seer_arrlong VALUES (?, ?); END;", len);
 }
 
-/* A query with a parameter array is refused, as SQL_PARAM_ARRAY_SELECTS
- * (SQL_PAS_NO_SELECT) says, on every tier: 9i and 10g+ used to answer one
- * parameter set's rows and report all three processed (#430). */
-static void check_array_query_refused(SQLHDBC dbc)
+/* A query with a parameter array gives one result set per parameter set, as
+ * SQL_PARAM_ARRAY_SELECTS (SQL_PAS_BATCH) says, on every tier (#431): the
+ * first from the execute, each next from SQLMoreResults, then SQL_NO_DATA.
+ * A set marked SQL_PARAM_IGNORE runs no query and gives no result set. The
+ * status array and the processed count follow each set as it runs. Before,
+ * such a query was refused (#430), and before that 9i and 10g+ answered one
+ * set's rows and reported all three processed. */
+static void check_array_query_batch(SQLHDBC dbc)
 {
-  const char *name = "query with a parameter array: refused (SQL_PAS_NO_SELECT)";
+  const char *name = "query with a parameter array: one result set per set (SQL_PAS_BATCH)";
   SQLUINTEGER pas = 0;
   SQLGetInfo(dbc, SQL_PARAM_ARRAY_SELECTS, &pas, sizeof pas, NULL);
   SQLHSTMT st;
   SQLAllocHandle(SQL_HANDLE_STMT, dbc, &st);
   SQLINTEGER ids[3] = {1, 2, 3};
+  SQLUSMALLINT ops[3] = {SQL_PARAM_PROCEED, SQL_PARAM_IGNORE, SQL_PARAM_PROCEED};
+  SQLUSMALLINT status[3] = {99, 99, 99};
+  SQLULEN done = 99;
   SQLSetStmtAttr(st, SQL_ATTR_PARAMSET_SIZE, (SQLPOINTER)(SQLULEN)3, 0);
+  SQLSetStmtAttr(st, SQL_ATTR_PARAM_OPERATION_PTR, ops, 0);
+  SQLSetStmtAttr(st, SQL_ATTR_PARAM_STATUS_PTR, status, 0);
+  SQLSetStmtAttr(st, SQL_ATTR_PARAMS_PROCESSED_PTR, &done, 0);
   SQLBindParameter(st, 1, SQL_PARAM_INPUT, SQL_C_SLONG, SQL_INTEGER, 0, 0, ids, 0, NULL);
-  SQLRETURN rc = SQLExecDirect(st, (SQLCHAR *)"SELECT :1 * 10 FROM dual", SQL_NTS);
-  SQLCHAR state[6] = "";
-  SQLCHAR msg[256] = "";
-  SQLINTEGER native = 0;
-  SQLSMALLINT ml = 0;
-  SQLGetDiagRec(SQL_HANDLE_STMT, st, 1, state, &native, msg, sizeof msg, &ml);
-  SQLFreeHandle(SQL_HANDLE_STMT, st);
-  if (pas == SQL_PAS_NO_SELECT && rc == SQL_ERROR && strcmp((char *)state, "HYC00") == 0 &&
-      strstr((char *)msg, "array of parameter sets") != NULL)
-    pass(name);
-  else {
-    char m[400];
-    snprintf(m, sizeof m, "SQL_PARAM_ARRAY_SELECTS %u, rc %d, %s '%s' (want SQL_ERROR, HYC00)",
-             (unsigned)pas, (int)rc, state, msg);
-    fail(name, m);
+  char m[400] = "", err[256] = "";
+  SQLRETURN rc = SQLExecDirect(st, (SQLCHAR *)"SELECT ? * 10 FROM dual", SQL_NTS);
+  static const char *const want[2] = {"10", "30"};
+  for (int set = 0; set < 2 && !m[0]; set++) {
+    if (set > 0)
+      rc = SQLMoreResults(st);
+    char v[32] = "";
+    SQLLEN ind = 0;
+    if (!SQL_SUCCEEDED(rc) || !SQL_SUCCEEDED(SQLFetch(st)) ||
+        !SQL_SUCCEEDED(SQLGetData(st, 1, SQL_C_CHAR, v, sizeof v, &ind))) {
+      diag_text(SQL_HANDLE_STMT, st, err, sizeof err);
+      snprintf(m, sizeof m, "result set %d: rc %d %s", set + 1, (int)rc, err);
+    } else if (strcmp(v, want[set]) != 0 || SQLFetch(st) != SQL_NO_DATA) {
+      snprintf(m, sizeof m, "result set %d: '%s' (want one row, %s)", set + 1, v, want[set]);
+    } else if (done != (SQLULEN)set + 1) {
+      snprintf(m, sizeof m, "after result set %d: %lu processed", set + 1, (unsigned long)done);
+    }
   }
+  if (!m[0] && (status[0] != SQL_PARAM_SUCCESS || status[1] != SQL_PARAM_UNUSED ||
+                status[2] != SQL_PARAM_SUCCESS))
+    snprintf(m, sizeof m, "statuses %u %u %u (want SUCCESS, UNUSED, SUCCESS)", (unsigned)status[0],
+             (unsigned)status[1], (unsigned)status[2]);
+  if (!m[0] && (rc = SQLMoreResults(st)) != SQL_NO_DATA)
+    snprintf(m, sizeof m, "SQLMoreResults after the last set: rc %d (want SQL_NO_DATA)", (int)rc);
+  if (!m[0] && pas != SQL_PAS_BATCH)
+    snprintf(m, sizeof m, "SQL_PARAM_ARRAY_SELECTS %u (want SQL_PAS_BATCH)", (unsigned)pas);
+  SQLFreeHandle(SQL_HANDLE_STMT, st);
+  if (m[0] == '\0')
+    pass(name);
+  else
+    fail(name, m);
 }
 
 /* A NULL parameter declared as SQL_INTEGER / SQL_TYPE_DATE is typed as such,
@@ -4548,8 +4573,10 @@ static int count_result_sets(SQLHDBC dbc, const char *sql, char *err, size_t err
 }
 
 /* SQL_MULT_RESULT_SETS and SQL_BATCH_SUPPORT (#312) match what the server
- * does on every release: "Y" and SQL_BS_SELECT_PROC exactly where a block,
- * and a procedure called through {call}, really give two result sets. */
+ * does on every release: SQL_BS_SELECT_PROC exactly where a procedure called
+ * through {call} really gives two result sets. SQL_MULT_RESULT_SETS is "Y"
+ * everywhere, since a query with a parameter array gives one result set per
+ * set on every release (#431); 12c+ blocks give two as well. */
 static void check_mult_result_sets(SQLHDBC dbc)
 {
   const char *name = "SQL_MULT_RESULT_SETS / SQL_BATCH_SUPPORT match the server";
@@ -4577,8 +4604,8 @@ static void check_mult_result_sets(SQLHDBC dbc)
     snprintf(m, sizeof m, "the two-result block gave %d sets", block);
   else if (call >= 0 && call != 2)
     snprintf(m, sizeof m, "{call} of the two-result procedure gave %d sets", call);
-  else if ((strcmp(mrs, "Y") == 0) != (block == 2))
-    snprintf(m, sizeof m, "SQL_MULT_RESULT_SETS '%s', block gave %d sets", mrs, block);
+  else if (strcmp(mrs, "Y") != 0)
+    snprintf(m, sizeof m, "SQL_MULT_RESULT_SETS '%s' (want Y)", mrs);
   else if (bs != (call == 2 ? (SQLUINTEGER)SQL_BS_SELECT_PROC : 0))
     snprintf(m, sizeof m, "SQL_BATCH_SUPPORT 0x%x, {call} gave %d sets (%s)", (unsigned)bs, call,
              cerr);
@@ -5592,7 +5619,7 @@ static void check_getinfo_answers(SQLHDBC dbc, const char *user, const char *svc
   SQLGetInfo(dbc, SQL_FORWARD_ONLY_CURSOR_ATTRIBUTES1, &fo, sizeof fo, NULL);
   SQLGetInfo(dbc, SQL_PARAM_ARRAY_ROW_COUNTS, &parc, sizeof parc, NULL);
   SQLGetInfo(dbc, SQL_PARAM_ARRAY_SELECTS, &pas, sizeof pas, NULL);
-  if (!(fo & SQL_CA1_NEXT) || parc != SQL_PARC_NO_BATCH || pas != SQL_PAS_NO_SELECT) {
+  if (!(fo & SQL_CA1_NEXT) || parc != SQL_PARC_NO_BATCH || pas != SQL_PAS_BATCH) {
     size_t ml = strlen(m);
     snprintf(m + ml, sizeof m - ml, "forward-only %#x, PARC %u, PAS %u", (unsigned)fo,
              (unsigned)parc, (unsigned)pas);
@@ -8546,7 +8573,7 @@ int main(void)
     check_array_long_text(dbc);
     check_array_huge_text(dbc);
     check_array_block(dbc);
-    check_array_query_refused(dbc);
+    check_array_query_batch(dbc);
     check_returning_failure_recovers(dbc);
     check_inout_param(dbc);
     check_returning_only_binds(dbc);

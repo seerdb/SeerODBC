@@ -378,14 +378,23 @@ static unsigned bind_flags(const OdbcStmt *s)
   return s->dbc->conn != NULL && !seer_db_charset_unicode(s->dbc->conn) ? BIND_NATIONAL : 0;
 }
 
+/* The parameter set a single-row execute reads: the first, or for a query
+ * run one set per result set, the current one (#431). */
+static SQLULEN param_row(const OdbcStmt *s)
+{
+  return s->pas_query && s->pas_k < s->n_param_rows ? s->param_rows[s->pas_k] : 0;
+}
+
 static void *param_buf(const OdbcStmt *s, const OdbcParam *p)
 {
-  return seer_odbc_bound_at(p->buf, s->param_bind_offset, 0, 0, 0);
+  return seer_odbc_bound_at(p->buf, s->param_bind_offset, s->param_bind_type,
+                            ctype_stride(param_c_type(p), p->buflen), param_row(s));
 }
 
 static SQLLEN *param_ind(const OdbcStmt *s, const OdbcParam *p)
 {
-  return seer_odbc_bound_at(p->indicator, s->param_bind_offset, 0, 0, 0);
+  return seer_odbc_bound_at(p->indicator, s->param_bind_offset, s->param_bind_type, sizeof(SQLLEN),
+                            param_row(s));
 }
 
 /* A SQL_SEER_REF parameter (#241): the REF's bytes IN, or a REF OUT, the type
@@ -446,7 +455,8 @@ static SQLRETURN apply_params(OdbcStmt *s)
     if (s->param_operation == NULL || s->param_operation[row] != SQL_PARAM_IGNORE)
       s->param_rows[s->n_param_rows++] = row;
 
-  if (n > 1) {
+  /* A query runs its sets one at a time, each a single-row execute (#431). */
+  if (n > 1 && !s->pas_query) {
     for (int i = 0; i < s->num_params; i++)
       if (s->params[i].bound && s->params[i].sql_type == SQL_SEER_REF)
         return seer_odbc_diag(s, "HYC00", 0,
@@ -556,6 +566,7 @@ static SQLRETURN apply_params(OdbcStmt *s)
  * binding array. */
 SQLRETURN seer_odbc_run_query(OdbcStmt *s, const char *sql, const char *const *params, int nparams)
 {
+  s->pas_query = 0; /* one result set, whatever SQL_ATTR_PARAMSET_SIZE says */
   if (s->core != NULL) {
     seer_stmt_close(s->core);
     s->core = NULL;
@@ -640,6 +651,19 @@ static SQLRETURN exec_core(OdbcStmt *s, const char *sql)
   if (st != SEER_OK) {
     free(rewritten); /* sql may alias it, but nothing reads sql now */
     return seer_odbc_diag(s, seer_odbc_sqlstate(st), 0, seer_strerror(st), SQL_ERROR);
+  }
+
+  /* A query with a parameter array runs one set per result set
+   * (SQL_PAS_BATCH, #431): the first now, each next on SQLMoreResults, by
+   * the SQL as sent here. */
+  free(s->pas_sql);
+  s->pas_sql = NULL;
+  s->pas_k = 0;
+  s->pas_query = (s->paramset_size ? s->paramset_size : 1) > 1 && seer_stmt_is_query(s->core);
+  if (s->pas_query && (s->pas_sql = strdup(sql)) == NULL) {
+    s->pas_query = 0;
+    free(rewritten);
+    return seer_odbc_diag(s, "HY001", 0, "Out of memory", SQL_ERROR);
   }
 
   /* Data-at-execution: if any single-row INPUT parameter was bound with
@@ -732,13 +756,35 @@ static bool lob_mismatch(OdbcStmt *s, SeerStatus st)
   return false;
 }
 
+/* A query's parameter sets run one at a time, one result set each (#431):
+ * the status of set pas_k, the sets processed so far, and on the first set
+ * every other set SQL_PARAM_UNUSED (ignored, or not run yet). */
+static void pas_status(OdbcStmt *s, SQLUSMALLINT status)
+{
+  if (!s->pas_query || s->pas_k >= s->n_param_rows)
+    return;
+  SQLULEN n = s->paramset_size ? s->paramset_size : 1;
+  if (s->params_processed != NULL)
+    *s->params_processed = s->pas_k + 1;
+  if (s->param_status == NULL)
+    return;
+  if (s->pas_k == 0)
+    for (SQLULEN r = 0; r < n; r++)
+      s->param_status[r] = SQL_PARAM_UNUSED;
+  s->param_status[s->param_rows[s->pas_k]] = status;
+}
+
 static SQLRETURN exec_finish(OdbcStmt *s)
 {
   SQLRETURN pr = apply_params(s);
-  if (pr != SQL_SUCCESS)
+  if (pr != SQL_SUCCESS) {
+    pas_status(s, SQL_PARAM_ERROR);
+    s->pas_query = 0;
     return pr;
+  }
 
   if (s->n_param_rows == 0) { /* every set marked SQL_PARAM_IGNORE: nothing runs */
+    s->pas_query = 0;
     SQLULEN n = s->paramset_size ? s->paramset_size : 1;
     if (s->params_processed != NULL)
       *s->params_processed = 0;
@@ -766,10 +812,13 @@ static SQLRETURN exec_finish(OdbcStmt *s)
   }
   s->bind_national = 0;
   s->bind_as_lob = 0;
-  if (pr != SQL_SUCCESS)
-    return pr;
-  if (st != SEER_OK)
-    return seer_odbc_exec_error(s, st);
+  if (pr != SQL_SUCCESS || st != SEER_OK) {
+    /* A query's set that failed is SQL_PARAM_ERROR, and the sets after it
+     * don't run (#431). */
+    pas_status(s, SQL_PARAM_ERROR);
+    s->pas_query = 0;
+    return pr != SQL_SUCCESS ? pr : seer_odbc_exec_error(s, st);
+  }
   /* Created, but compiled with errors: success with a warning, as Oracle's own
    * clients report it (ORA-24344). */
   bool compile_warning = seer_stmt_compile_warning(s->core);
@@ -781,7 +830,9 @@ static SQLRETURN exec_finish(OdbcStmt *s)
                                                       "ORA-24344: success with compilation error",
                                                       SQL_SUCCESS_WITH_INFO)
                                      : SQL_SUCCESS;
-  {
+  if (s->pas_query) {
+    pas_status(s, SQL_PARAM_SUCCESS);
+  } else {
     SQLULEN n = s->paramset_size ? s->paramset_size : 1;
     SQLULEN run = s->n_param_rows;
     if (s->params_processed != NULL)
@@ -892,6 +943,32 @@ static SQLRETURN exec_finish(OdbcStmt *s)
   s->rowset_start = -1;
   s->cur_row = -1;
   return result;
+}
+
+SQLRETURN seer_odbc_next_param_set(OdbcStmt *s)
+{
+  if (!s->pas_query || s->pas_sql == NULL || s->core == NULL || s->pas_k + 1 >= s->n_param_rows) {
+    s->pas_query = 0;
+    return SQL_NO_DATA;
+  }
+  s->pas_k++;
+  /* The last set's ROWIDs go; an updatable cursor's base table stays. */
+  if (s->rowids != NULL) {
+    for (size_t i = 0; i < s->num_rowids; i++)
+      free(s->rowids[i]);
+    free(s->rowids);
+    s->rowids = NULL;
+  }
+  s->num_rowids = 0;
+  seer_stmt_close(s->core); /* the cached cursor is re-used, no re-parse */
+  s->core = NULL;
+  SeerStatus st = seer_stmt_prepare(s->dbc->conn, s->pas_sql, &s->core);
+  if (st != SEER_OK) {
+    pas_status(s, SQL_PARAM_ERROR);
+    s->pas_query = 0;
+    return seer_odbc_diag(s, seer_odbc_sqlstate(st), 0, seer_strerror(st), SQL_ERROR);
+  }
+  return exec_finish(s);
 }
 
 /* ------------------------------------------------------ cursor names (#288) */

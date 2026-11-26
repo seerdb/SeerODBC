@@ -263,10 +263,9 @@ SQLRETURN SQL_API SQLGetInfo(SQLHDBC ConnectionHandle, SQLUSMALLINT InfoType,
   case SQL_ODBC_INTERFACE_CONFORMANCE:
     return info_u32(SQL_OIC_CORE, InfoValuePtr);
   case SQL_MULT_RESULT_SETS:
-    /* The only second result set is an implicit result (DBMS_SQL.RETURN_RESULT,
-     * via SQLMoreResults), which 12c brought (#312). */
-    return info_string(seer_odbc_server_major(c) >= 12 ? "Y" : "N", InfoValuePtr, BufferLength,
-                       StringLengthPtr);
+    /* A query with a parameter array gives one result set per set, on every
+     * release (#431); from 12c a block's implicit results do too (#312). */
+    return info_string("Y", InfoValuePtr, BufferLength, StringLengthPtr);
   case SQL_BATCH_SUPPORT:
     /* From 12c a procedure ({call}) returns its implicit results. No explicit
      * batches (Oracle runs one statement at a time), and a procedure's DML
@@ -483,8 +482,8 @@ SQLRETURN SQL_API SQLGetInfo(SQLHDBC ConnectionHandle, SQLUSMALLINT InfoType,
                     InfoValuePtr);
   case SQL_PARAM_ARRAY_ROW_COUNTS: /* one count for the whole array */
     return info_u32(SQL_PARC_NO_BATCH, InfoValuePtr);
-  case SQL_PARAM_ARRAY_SELECTS:
-    return info_u32(SQL_PAS_NO_SELECT, InfoValuePtr);
+  case SQL_PARAM_ARRAY_SELECTS: /* one result set per parameter set (#431) */
+    return info_u32(SQL_PAS_BATCH, InfoValuePtr);
 
   /* --- cursors --- forward-only plus a buffered static (scrollable) cursor.
    * Both take SQLSetPos (POSITION / REFRESH / UPDATE / DELETE, any LockType

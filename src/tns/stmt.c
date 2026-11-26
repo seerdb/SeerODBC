@@ -8672,6 +8672,11 @@ int seer_stmt_compile_warning(SeerStmt *stmt)
   return stmt != NULL && stmt->compile_warning;
 }
 
+int seer_stmt_is_query(const SeerStmt *stmt)
+{
+  return stmt != NULL && stmt->sql != NULL && classify_sql(stmt->sql) == STMT_SELECT;
+}
+
 /* ----------------------------------------- one value per occurrence (#302) */
 
 /* The binds as the API set them, while the expanded set is on the statement. */

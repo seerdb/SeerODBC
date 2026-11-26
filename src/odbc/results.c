@@ -431,10 +431,12 @@ SQLRETURN SQL_API SQLColAttribute(SQLHSTMT StatementHandle, SQLUSMALLINT ColumnN
   return SQL_SUCCESS;
 }
 
-/* Advance to the next result set. The only multi-result source SeerODBC
- * produces is 23ai/12c implicit results (DBMS_SQL.RETURN_RESULT): each call
- * drains the next implicit cursor and makes it current. SQL_NO_DATA when none
- * remain (PEP-249 / ODBC contract). */
+/* Advance to the next result set. SeerODBC produces two kinds:
+ * - a query run with a parameter array: one result set per parameter set
+ *   (SQL_PAS_BATCH, #431), each next one run here;
+ * - 12c+ implicit results (DBMS_SQL.RETURN_RESULT): each call drains the next
+ *   implicit cursor and makes it current.
+ * SQL_NO_DATA when none remain (PEP-249 / ODBC contract). */
 SQLRETURN SQL_API SQLMoreResults(SQLHSTMT StatementHandle)
 {
   OdbcStmt *s = (OdbcStmt *)StatementHandle;
@@ -443,6 +445,8 @@ SQLRETURN SQL_API SQLMoreResults(SQLHSTMT StatementHandle)
   seer_odbc_diag_clear(s);
   if (s->core == NULL)
     return SQL_NO_DATA;
+  if (s->pas_query) /* a query has no implicit results */
+    return seer_odbc_next_param_set(s);
 
   seer_odbc_arm_timeout(s);
   SeerStatus st = seer_stmt_next_result(s->core);

@@ -532,6 +532,10 @@ SeerStatus seer_stmt_describe(SeerStmt *stmt);
  * package, trigger, ...) that compiled with errors: the statement succeeded
  * but the object is invalid (ORA-24344 "success with compilation error"). */
 int seer_stmt_compile_warning(SeerStmt *stmt);
+/* Non-zero when the prepared statement is a query (SELECT or WITH). A query
+ * runs with one parameter set at a time: seer_stmt_execute refuses it with an
+ * array of them (#430), and ODBC runs one set per result set (#431). */
+int seer_stmt_is_query(const SeerStmt *stmt);
 /* A 23ai VECTOR column's declared dimension count (0 = flexible) and element
  * format (2 FLOAT32, 3 FLOAT64, 4 INT8, 5 BINARY; 0 = flexible); both 0 for
  * any other column or an older server. */

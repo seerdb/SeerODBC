@@ -156,6 +156,7 @@ SQLRETURN SQL_API SQLFreeHandle(SQLSMALLINT HandleType, SQLHANDLE Handle)
       free(s->params[i].dae_buf), free(s->params[i].ref_type);
     free(s->params);
     free(s->param_rows);
+    free(s->pas_sql);
     free(s->sql);
     for (void **pp = &s->dbc->stmts; *pp != NULL; pp = &((OdbcStmt *)*pp)->next_stmt)
       if (*pp == s) {
